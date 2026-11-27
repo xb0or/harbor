@@ -1,0 +1,16 @@
+# 直推 zip 不要塞本地构建产物 / 运行时数据
+harbor.exe
+*.exe
+.git
+.snow
+*.log
+harbor.db
+harbor.db-wal
+harbor.db-shm
+*.key
+data/
+.smoke/
+.paas-test/
+tools/test-data/
+harbor.smoke.yaml
+tools/smoke/

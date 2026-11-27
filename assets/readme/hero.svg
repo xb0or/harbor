@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 400" width="100%" role="img" aria-labelledby="heroTitle heroDesc">
+  <title id="heroTitle">Harbor — 排队式 AI 网关</title>
+  <desc id="heroDesc">左侧是项目名与一句定位；右侧是上游泊位看板：两个上游满载、一个空闲，队列里还有请求在等待。</desc>
+  <defs>
+    <style>
+      .sans { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", "Microsoft YaHei", sans-serif; }
+      .mono { font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Cascadia Mono", monospace; }
+      .ink { fill: #12161C; }
+      .navy { fill: #14304A; }
+      .body { fill: #4A525C; }
+      .muted { fill: #7C838D; }
+      .signal { fill: #E2673B; }
+      .rule { stroke: #12161C; stroke-opacity: .12; stroke-width: 1; }
+      .slot { fill: #FFFFFF; stroke: #12161C; stroke-opacity: .22; stroke-width: 1.2; }
+      .slot-on { fill: #14304A; stroke: #14304A; stroke-width: 1.2; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="400" fill="#F7F6F3"/>
+  <rect x=".5" y=".5" width="1199" height="399" rx="10" fill="none" stroke="#12161C" stroke-opacity=".12"/>
+
+  <text class="mono navy" x="64" y="92" font-size="17" letter-spacing="2.6">OPENAI-COMPATIBLE · ADMISSION CONTROL</text>
+  <text class="sans ink" x="60" y="172" font-size="84" font-weight="700" letter-spacing="-1">Harbor</text>
+  <text class="sans navy" x="64" y="218" font-size="30" font-weight="600">不急着回 429 的 AI 网关</text>
+  <text class="sans body" x="64" y="256" font-size="21">上游忙，就把请求留在队列里等一个泊位；</text>
+  <text class="sans body" x="64" y="288" font-size="21">上游报错，只回统一格式，不透传原文。</text>
+  <line class="rule" x1="64" y1="316" x2="636" y2="316"/>
+  <text class="mono muted" x="64" y="350" font-size="18">base_url 一行接入</text>
+  <text class="mono muted" x="292" y="350" font-size="18">单二进制</text>
+  <text class="mono muted" x="428" y="350" font-size="18">SQLite 可选</text>
+
+  <line class="rule" x1="688" y1="56" x2="688" y2="344"/>
+
+  <text class="mono muted" x="728" y="88" font-size="17" letter-spacing="2.4">UPSTREAM BERTHS</text>
+
+  <!-- openai: 2/3 占用 -->
+  <text class="sans ink" x="728" y="140" font-size="22">openai</text>
+  <rect x="872" y="128" width="152" height="8" rx="4" fill="#12161C" fill-opacity=".1"/>
+  <rect class="slot-on" x="872" y="119" width="26" height="26" rx="6"/>
+  <rect class="slot-on" x="922" y="119" width="26" height="26" rx="6"/>
+  <rect class="slot" x="972" y="119" width="26" height="26" rx="6"/>
+  <text class="mono muted" x="1046" y="138" font-size="17">2/3</text>
+
+  <!-- deepseek: 1/3 -->
+  <text class="sans ink" x="728" y="198" font-size="22">deepseek</text>
+  <rect x="872" y="186" width="152" height="8" rx="4" fill="#12161C" fill-opacity=".1"/>
+  <rect class="slot-on" x="872" y="177" width="26" height="26" rx="6"/>
+  <rect class="slot" x="922" y="177" width="26" height="26" rx="6"/>
+  <rect class="slot" x="972" y="177" width="26" height="26" rx="6"/>
+  <text class="mono muted" x="1046" y="196" font-size="17">1/3</text>
+
+  <!-- backup: 空闲 -->
+  <text class="sans ink" x="728" y="256" font-size="22">backup</text>
+  <rect x="872" y="244" width="152" height="8" rx="4" fill="#12161C" fill-opacity=".1"/>
+  <rect class="slot" x="872" y="235" width="26" height="26" rx="6"/>
+  <rect class="slot" x="922" y="235" width="26" height="26" rx="6"/>
+  <rect class="slot" x="972" y="235" width="26" height="26" rx="6"/>
+  <text class="mono navy" x="1046" y="254" font-size="17">0/3 IDLE</text>
+
+  <line class="rule" x1="728" y1="292" x2="1136" y2="292"/>
+
+  <text class="mono muted" x="728" y="330" font-size="17" letter-spacing="2.4">QUEUE</text>
+  <rect x="836" y="306" width="28" height="28" rx="6" fill="#E2673B"/>
+  <text class="mono" x="850" y="326" font-size="16" text-anchor="middle" fill="#FFFFFF">1</text>
+  <rect x="876" y="306" width="28" height="28" rx="6" fill="none" stroke="#12161C" stroke-opacity=".22" stroke-width="1.2"/>
+  <rect x="916" y="306" width="28" height="28" rx="6" fill="none" stroke="#12161C" stroke-opacity=".22" stroke-width="1.2"/>
+  <text class="mono ink" x="962" y="326" font-size="17">hr_9f2c · 8.4s</text>
+</svg>

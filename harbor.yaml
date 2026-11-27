@@ -1,0 +1,78 @@
+# Harbor 部署配置模板（Zeabur / 任意 PaaS 用）。
+# 敏感值与运行时参数全部走环境变量（${VAR} 文本级展开，未设置会启动报错并给出变量名）：
+#   PORT              必填，PaaS 自动注入（Zeabur 默认提供）；本地 fallback 8080
+#   OPENAI_API_KEY    上游凭证（可多行/多变量）
+#   HARBOR_KEY        客户端接入用的 Harbor Key（任意随机长字符串）
+#   HARBOR_ADMIN_TOKEN 管理 API Bearer Token
+#   HARBOR_DB_PATH    持久化 SQLite 路径（挂载卷后设为 /data/harbor.db；不设会报错）
+#   HARBOR_KEY_PATH   凭证加密主密钥路径（务必与库一起备份；设 /data/harbor.key）
+# 本地运行：设好上述变量后 `harbor --config harbor.yaml`。
+
+server:
+  listen: "0.0.0.0:${PORT}"
+  max_body_size: 20mb
+  read_timeout: 30s
+  idle_timeout: 120s
+  max_body_bytes_in_flight: 256mb
+
+queue:
+  max_wait: 120s
+  max_depth: 200
+  keepalive: 15s
+  expose_queue_position: true
+  # 排队超过 30 秒仍未调度就提前返回 429（避免客户端干等到自己的超时）。
+  early_429_after: 30s
+
+limits:
+  max_provider_attempts: 3
+  request_timeout: 120s
+  backoff_base: 500ms
+  provider_cooldown: 30s
+
+# 长连接心跳保活（SSE / 流式响应）：静默过久时主动补空事件，避免被中间设备掐断。
+# 管理台「设置」页可热更新；配了 storage 时落库，重启保留。
+keepalive:
+  enabled: true
+  interval: 15s
+  style: comment
+  comment: keepalive
+
+providers:
+  - name: openai
+    type: openai-compatible
+    base_url: https://api.openai.com/v1
+    credentials:
+      - ${OPENAI_API_KEY}
+    concurrency: 2       # 上游账号并发上限
+    rpm: 60              # 每分钟请求数
+    # tpm: 1000000       # 每分钟 token（P1 生效）
+    # tph: 60000000      # 每小时 token
+    # tpd: 1000000000    # 每天 token
+
+routes:
+  # 简单格式：providers 列表 —— 上游模型名 = 统一模型名（同名直通）。
+  # 另外：Provider 的 models 列表（管理台维护）中的模型会自动可路由，无需此处配置。
+  gpt-4o:
+    providers: [openai]
+  # 高级格式：mappings —— 各渠道模型名不同时，把上游模型名改写为统一模型名。
+  # gpt-4o:
+  #   mappings:
+  #     - provider: openai
+  #       upstream_model: gpt-4o        # 留空 = 同名
+  #     - provider: deepseek
+  #       upstream_model: deepseek-chat  # 客户端请求 gpt-4o → 转发给 deepseek 时改写为 deepseek-chat
+
+keys:
+  # Harbor Key 是纯访问令牌：只含 ID/前缀/哈希/状态/模型白名单，无任何限流字段。
+  - secret: ${HARBOR_KEY}
+    allowed_models: [gpt-4o]
+
+admin:
+  token: ${HARBOR_ADMIN_TOKEN}
+
+storage:
+  db_path: ${HARBOR_DB_PATH}
+  key_path: ${HARBOR_KEY_PATH}
+
+log:
+  level: info

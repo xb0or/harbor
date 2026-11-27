@@ -1,0 +1,77 @@
+# Harbor AI 网关配置示例
+# 启动: harbor --config harbor.yaml
+
+server:
+  listen: "0.0.0.0:8080"
+  max_body_size: 20mb
+  read_timeout: 30s
+  idle_timeout: 120s
+  max_body_bytes_in_flight: 256mb
+
+queue:
+  max_wait: 120s        # 排队最长等待，超过返回 429
+  max_depth: 200        # 队列容量
+  keepalive: 15s        # 排队期间 SSE 心跳间隔
+  expose_queue_position: true
+
+limits:
+  max_provider_attempts: 3    # 单个请求最多尝试上游次数
+  request_timeout: 120s       # 单个请求总超时（含排队）
+  backoff_base: 500ms         # 重试退避基数
+  provider_cooldown: 30s      # 上游失败后的冷却时间
+
+providers:
+  - name: openai
+    type: openai-compatible
+    base_url: https://api.openai.com/v1
+    credentials:
+      - ${OPENAI_KEY_1}
+      - ${OPENAI_KEY_2}
+    concurrency: 2       # 上游账号并发上限
+    rpm: 60              # 每分钟请求数
+    tpm: 1000000         # 每分钟 token（P1 生效）
+    tph: 60000000        # 每小时 token
+    tpd: 1000000000      # 每天 token
+
+  - name: deepseek
+    type: openai-compatible
+    base_url: https://api.deepseek.com/v1
+    credentials:
+      - ${DEEPSEEK_KEY}
+
+routes:
+  # 简单格式：providers 列表 —— 上游模型名 = 统一模型名（同名直通）。
+  # 另外：Provider 的 models 列表（管理台维护）中的模型会自动可路由，无需此处配置。
+  gpt-4o:
+    providers: [openai]
+  deepseek-chat:
+    providers: [deepseek]
+  # 高级格式：mappings —— 各渠道模型名不同时，把上游模型名改写为统一模型名。
+  # gpt-4o:
+  #   mappings:
+  #     - provider: openai
+  #       upstream_model: gpt-4o        # 留空 = 同名
+  #     - provider: deepseek
+  #       upstream_model: deepseek-chat  # 客户端请求 gpt-4o → 转发给 deepseek 时改写为 deepseek-chat
+
+keys:
+  # P0: 运行时只保存 sha256 哈希；管理台新建的 Key 在持久化模式下会加密保存 secret。
+  # 建议: harbor keygen 生成
+  # Harbor Key 是纯访问令牌：只含 ID/前缀/哈希/状态/模型白名单，无任何限流字段
+  #（限流属于 Provider 上游账号配额，见上方 providers 段）。
+  - secret: "hr-live-demo-00000000"
+    allowed_models: [gpt-4o, deepseek-chat]
+
+admin:
+  token: ""              # 管理接口 Bearer Token，留空则管理接口关闭
+
+storage:
+  # SQLite 持久化（P2）。db_path 留空/整段删除 = 纯内存模式（P0 行为）。
+  # 开启后：请求审计、Key/Provider/路由元数据落库；管理台 Key secret 与上游凭证 AES-GCM 加密落库；
+  # 加密主密钥自动生成/加载，丢失 harbor.key 将无法恢复已存凭证或管理台 Key，务必备份。
+  db_path: "data/harbor.db"
+  key_path: "data/harbor.key"   # 留空 = 默认工作目录下 harbor.key
+
+log:
+  level: info
+  # file: harbor.log

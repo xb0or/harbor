@@ -1,0 +1,14 @@
+# 统一换行符，避免 Windows 上 CRLF 混入
+* text=auto eol=lf
+
+# 二进制
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.exe binary
+*.db binary
+*.key binary
+
+# 生成的 SVG 资产按文本处理
+*.svg text

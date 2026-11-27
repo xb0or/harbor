@@ -1,0 +1,59 @@
+# ───────────────────────────────────────────────
+# Harbor .gitignore
+# 原则：源码、示例配置、文档、工具可以入库；
+#       一切密钥 / 数据库 / 内部部署记录 / 构建产物都不入库。
+# ───────────────────────────────────────────────
+
+# ── 构建产物 ──
+/harbor
+harbor.exe
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# ── 运行时数据：SQLite 与凭证加密主密钥（绝不入库）──
+harbor.db
+harbor.db-wal
+harbor.db-shm
+harbor.key
+*.key
+data/
+harbor.smoke.yaml
+tools/test-data/
+
+# ── 内部资料：AI 协作记录、部署记录（含项目 / 环境 ID、线上域名）、备份 ──
+CLAUDE.md
+tools/zeabur-deploy-*.md
+beifen/
+.snow/
+
+# ── 日志与压测临时输出 ──
+*.log
+*.err.log
+tools/loadtest/result-*.json
+__pycache__/
+*.pyc
+
+# ── 临时目录 ──
+.smoke/
+.paas-test/
+/tmp
+/test-data
+
+# ── 编辑器与系统文件 ──
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ── 前端依赖（Go 项目无 vendor；若日后引入前端）──
+node_modules/
+dist/
+build/

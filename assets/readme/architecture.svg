@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 440" width="100%" role="img" aria-labelledby="arTitle arDesc">
+  <title id="arTitle">Harbor 请求管线</title>
+  <desc id="arDesc">客户端经 Key 鉴权、三档额度、FIFO 队列、执行器到上游；上游失败时结算本次尝试并把原请求放回队尾；所有对外响应都经过统一错误格式。</desc>
+  <defs>
+    <style>
+      .sans { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", "Microsoft YaHei", sans-serif; }
+      .mono { font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Cascadia Mono", monospace; }
+      .ink { fill: #12161C; }
+      .navy { fill: #14304A; }
+      .muted { fill: #7C838D; }
+      .fail { fill: #A33B2A; }
+      .rule { stroke: #12161C; stroke-opacity: .12; stroke-width: 1; }
+      .box { fill: #FFFFFF; stroke: #12161C; stroke-opacity: .18; stroke-width: 1.2; }
+      .flow { stroke: #14304A; stroke-width: 1.6; fill: none; }
+    </style>
+    <marker id="arArrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#14304A"/>
+    </marker>
+    <marker id="arBack" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#A33B2A"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="440" fill="#F7F6F3"/>
+  <rect x=".5" y=".5" width="1199" height="439" rx="10" fill="none" stroke="#12161C" stroke-opacity=".12"/>
+
+  <text class="mono navy" x="64" y="56" font-size="18" letter-spacing="2.4">REQUEST PATH</text>
+  <text class="mono muted" x="1136" y="56" font-size="16" text-anchor="end">单进程 · 单队列 · 事件驱动</text>
+
+  <!-- 节点 -->
+  <rect class="box" x="60" y="96" width="156" height="112" rx="8"/>
+  <text class="sans ink" x="74" y="142" font-size="20" font-weight="600">CLIENT</text>
+  <text class="sans muted" x="74" y="172" font-size="17">SDK 直连</text>
+
+  <rect class="box" x="240" y="96" width="156" height="112" rx="8"/>
+  <text class="sans ink" x="254" y="142" font-size="20" font-weight="600">KEY AUTH</text>
+  <text class="sans muted" x="254" y="172" font-size="17">sha256</text>
+
+  <rect class="box" x="420" y="96" width="156" height="112" rx="8"/>
+  <text class="sans ink" x="434" y="142" font-size="20" font-weight="600">LIMITS</text>
+  <text class="sans muted" x="434" y="172" font-size="17">3 档额度</text>
+
+  <rect x="600" y="96" width="156" height="112" rx="8" fill="#14304A"/>
+  <text x="614" y="142" font-size="20" font-weight="600" fill="#FFFFFF" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans SC', 'Microsoft YaHei', sans-serif">FIFO QUEUE</text>
+  <text x="614" y="172" font-size="17" fill="#C9D4E0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans SC', 'Microsoft YaHei', sans-serif">排队等待</text>
+
+  <rect class="box" x="780" y="96" width="156" height="112" rx="8"/>
+  <text class="sans ink" x="794" y="142" font-size="20" font-weight="600">EXECUTOR</text>
+  <text class="sans muted" x="794" y="172" font-size="17">失败回队尾</text>
+
+  <rect class="box" x="960" y="96" width="156" height="112" rx="8"/>
+  <text class="sans ink" x="974" y="142" font-size="20" font-weight="600">UPSTREAM</text>
+  <text class="sans muted" x="974" y="172" font-size="17">多凭证</text>
+
+  <!-- 前进箭头 -->
+  <line class="flow" x1="218" y1="152" x2="236" y2="152" marker-end="url(#arArrow)"/>
+  <line class="flow" x1="398" y1="152" x2="416" y2="152" marker-end="url(#arArrow)"/>
+  <line class="flow" x1="578" y1="152" x2="596" y2="152" marker-end="url(#arArrow)"/>
+  <line class="flow" x1="758" y1="152" x2="776" y2="152" marker-end="url(#arArrow)"/>
+  <line class="flow" x1="938" y1="152" x2="956" y2="152" marker-end="url(#arArrow)"/>
+
+  <!-- 失败回队尾 -->
+  <path d="M1038 208 V252 H678 V216" fill="none" stroke="#A33B2A" stroke-opacity=".75" stroke-width="1.6" stroke-dasharray="7 5" marker-end="url(#arBack)"/>
+  <text class="sans fail" x="850" y="282" font-size="16" text-anchor="middle">429 / 5xx / 连接失败 → 结算 attempt 后回队尾</text>
+
+  <!-- 错误收敛 -->
+  <rect x="60" y="310" width="1056" height="88" rx="8" fill="#12161C" fill-opacity=".045" stroke="#12161C" stroke-opacity=".12"/>
+  <text class="sans ink" x="84" y="346" font-size="20" font-weight="600">错误收敛 · Error Normalizer</text>
+  <text class="mono muted" x="84" y="376" font-size="17">{"error":{"message","type","code"}} + Retry-After · 上游原文只进审计</text>
+</svg>

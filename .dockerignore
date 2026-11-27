@@ -1,0 +1,18 @@
+# 构建产物与本地运行时
+harbor.exe
+*.exe
+.git
+.snow
+*.log
+
+# 本地/测试数据，线上走 /data 卷
+harbor.db
+harbor.db-wal
+harbor.db-shm
+*.key
+data/
+.smoke/
+.paas-test/
+tools/test-data/
+harbor.smoke.yaml
+tools/smoke/

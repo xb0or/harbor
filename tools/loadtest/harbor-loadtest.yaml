@@ -1,0 +1,45 @@
+# Harbor 本地并发排队压测专用配置（纯内存模式，不碰真实额度）。
+# 用法: harbor.exe --config tools/loadtest/harbor-loadtest.yaml
+# 配套: tools/loadtest/run-local.ps1 一键起 mock + harbor 并跑压测。
+
+server:
+  listen: "127.0.0.1:8080"
+  max_body_size: 20mb
+  read_timeout: 30s
+  idle_timeout: 120s
+
+queue:
+  max_wait: 60s        # 排队最长等待，超过返回 429
+  max_depth: 100       # 队列容量
+  keepalive: 5s        # 排队期间 SSE 心跳
+  expose_queue_position: true
+
+limits:
+  max_provider_attempts: 3    # 单请求最多尝试上游次数（重排预算）
+  request_timeout: 90s
+  backoff_base: 200ms
+  provider_cooldown: 5s
+
+providers:
+  - name: smoke
+    type: openai-compatible
+    base_url: http://127.0.0.1:18090/v1
+    credentials:
+      - sk-mock-credential
+    concurrency: 2       # 上游并发上限（压测对象：超过它就该排队）
+    rpm: 1000            # 放宽 RPM，避免干扰排队观察
+
+routes:
+  smoke-1:
+    providers: [smoke]
+
+keys:
+  - secret: "hr-loadtest-00000000"
+    allowed_models: [smoke-1]
+
+admin:
+  token: "loadtest-admin"
+
+# 不留 storage：纯内存模式，每次跑完干净。
+log:
+  level: info
