@@ -17,6 +17,7 @@ const maxBridgeSSEBytes = 4 << 20
 // synchronous Responses conversion and the incremental SSE bridge.
 type streamChatDelta struct {
 	Content          json.RawMessage       `json:"content"`
+	Reasoning        string                `json:"reasoning"`
 	ReasoningContent string                `json:"reasoning_content"`
 	ToolCalls        []streamChatToolDelta `json:"tool_calls"`
 }
@@ -226,7 +227,26 @@ func (b *streamBridge) handleLine(line []byte) {
 		}
 		b.eventData = append(b.eventData, value...)
 		b.eventData = append(b.eventData, '\n')
+		// 对齐 agent2api 的 ReasoningCoalescer：每个完整的 data 行立即成帧。
+		// SSE 允许一个事件拆成多条 data 行，所以只有「当前累积已是合法 JSON
+		// 或 [DONE]」时才提前 dispatch；半截 JSON 继续等后续 data 行/空行。
+		// 这样上游只发 "data: ...\n"、不发空行时也不会把整条流攒到 EOF。
+		if b.eventDataComplete() {
+			b.dispatchEvent()
+		}
 	}
+}
+
+// eventDataComplete 判断当前累积的 data 是否已经构成一个可下发的事件。
+func (b *streamBridge) eventDataComplete() bool {
+	data := bytes.TrimSpace(b.eventData)
+	if len(data) == 0 {
+		return false
+	}
+	if bytes.Equal(data, []byte("[DONE]")) {
+		return true
+	}
+	return json.Valid(data)
 }
 
 func (b *streamBridge) dispatchEvent() {
@@ -247,7 +267,8 @@ func (b *streamBridge) dispatchEvent() {
 	}
 	var chunk streamChatChunk
 	if data[0] != '{' || json.Unmarshal(data, &chunk) != nil {
-		b.fail(nil)
+		// 容错而非熔断：单条无法解析的控制载荷直接跳过，保持连接与其它事件；
+		// 不能因为一次解析失败清空缓冲、终止整条流。
 		return
 	}
 	if chunk.Type == "error" || (len(chunk.Error) > 0 && !bytes.Equal(bytes.TrimSpace(chunk.Error), []byte("null"))) {
@@ -285,7 +306,13 @@ func (b *streamBridge) dispatchEvent() {
 			text = rawText(choice.Message.Content)
 		}
 		if delta.ReasoningContent == "" {
+			delta.ReasoningContent = delta.Reasoning
+		}
+		if delta.ReasoningContent == "" {
 			delta.ReasoningContent = choice.Message.ReasoningContent
+		}
+		if delta.ReasoningContent == "" {
+			delta.ReasoningContent = choice.Message.Reasoning
 		}
 		if len(delta.ToolCalls) == 0 {
 			delta.ToolCalls = choice.Message.ToolCalls
@@ -484,8 +511,9 @@ func (b *streamBridge) finish() {
 	case KindResponses:
 		for _, item := range b.outputs {
 			if !item.announced {
-				b.fail(nil)
-				return
+				// 正常收尾时补齐未宣布的 output item（例如工具参数先于
+				// 身份到达而被暂存），不能因为「未 announce」把整条流判失败。
+				b.announce(item)
 			}
 		}
 		for _, item := range b.outputs {

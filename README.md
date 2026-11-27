@@ -139,7 +139,7 @@ curl.exe -s http://127.0.0.1:8080/v1/models -H "Authorization: Bearer hr-live-de
 
 `GET /api/requests` 支持 `q`、`status`、`provider`、`model`、`key_id`、`since`、`until`（RFC3339 或 `YYYY-MM-DD`）、`limit`、`offset`。
 
-审计在原有字段上补了 `client_ua`、`client_ip`、`upstream_model`、`first_token_ms`（流式首帧耗时）；旧库由 `migrateRequestsDetail` 补列，历史行这四个字段为空。日期筛选按 `substr(finished_at,1,10)` 做日粒度比较，避开 SQLite 对带时区字符串的解析问题。
+审计在原有字段上补了 `client_ua`、`client_ip`、`upstream_model`、`first_token_ms`（流式首帧耗时），以及链路观测字段 `inbound_path`（真实入站路径）、`upstream_header_ms`（上游响应头耗时）、`upstream_content_type`（上游 Content-Type）；旧库由对应 `migrateRequests*` 迁移补列，历史行这些字段为空。日期筛选按 `substr(finished_at,1,10)` 做日粒度比较，避开 SQLite 对带时区字符串的解析问题。
 
 </details>
 
@@ -210,7 +210,7 @@ storage:
 
 ```yaml
 keepalive:
-  enabled: true       # 默认 true
+  enabled: false      # 默认关闭；显式 true 才发送
   interval: 15s       # 空闲阈值，1s–5m
   style: comment      # comment = SSE 注释行（SDK 忽略）；event = data 事件
   comment: keepalive  # comment 文本，最长 64 字符
@@ -218,7 +218,17 @@ keepalive:
 
 `comment` 写 `: keepalive\n\n`，OpenAI 兼容 SDK 当注释忽略，最安全；`event` 写 `data: {"type":"keepalive"}\n\n`，适合要显式收到事件的自研客户端。排队与流式转发共用一套配置，非流式不涉及；没配 `keepalive.interval` 时沿用旧字段 `queue.keepalive`。
 
-**只在事件边界发心跳**：转发阶段会记录已写出的最后 4 个字节，只有上一条 SSE 事件完整结束（`\n\n` / `\r\n\r\n`）或尚未写出任何字节时才插入心跳；否则 200ms 后重试。上游把一条 `data` 拆成多次写时，中途插注释会把 JSON 截断，这是历史上的流式失效根因。
+默认关闭是为了不在首帧抢先写入 `: keepalive`：部分严格 SSE 客户端会因此解析异常。显式开启后也只在**空闲超过阈值**且处于完整事件边界时发送——转发阶段会记录已写出的最后 4 个字节，只有上一条 SSE 事件完整结束（`\n\n` / `\r\n\r\n`）或尚未写出任何字节时才插入心跳；否则 200ms 后重试。上游把一条 `data` 拆成多次写时，中途插注释会把 JSON 截断，这是历史上的流式失效根因。
+
+## 流式超时模型
+
+流式请求不套 `limits.request_timeout` 的整段总超时（否则长回答会在生成中途被取消），而是拆成三段：
+
+1. **排队超时**：`queue.max_wait`（以及可选的 `early_429_after`）。SSE 头提交前仍返回标准 JSON 429/503。
+2. **上游首包超时**：`limits.stream_ttfb_timeout`（默认 60s），只覆盖「发出请求 → 收到 HTTP 响应头」。到点后关闭上游连接并按 504 收敛。
+3. **流转发空闲读超时**：`limits.stream_idle_timeout`（默认 120s，0=关闭）。每收到一块上游数据即重置；到点或客户端断开时立即关闭上游 `Body` 并释放排队/并发槽。
+
+非流式请求仍保留 `request_timeout` 作为总超时（含排队 + 执行 + 读响应）。
 
 ## 部署
 
@@ -278,7 +288,7 @@ location /v1/ {
 }
 ```
 
-代理超时要覆盖 `limits.request_timeout` 并留足余量——这个总超时已经包含排队，不能把排队和执行各算一份预算。心跳只是保活，不代表上游已开始生成，也突破不了代理的硬性总超时。
+代理超时要覆盖 `limits.request_timeout`（非流式总超时）以及流式链路的排队/TTFB/空闲预算，并留足余量。流式请求没有整段总超时，不能用它推导代理的空闲超时；心跳只是保活，不代表上游已开始生成。
 
 </details>
 
@@ -290,7 +300,7 @@ Harbor 按 **Provider** 共享并发、RPM、Token Gate——所有 Key 和模�
 2. 可恢复的 429/529、5xx、连接错误：关闭本次上游响应、结算该 attempt、释放槽位，把**原请求放回队尾**；期间保留 HTTP 连接、请求体和 Request ID，不向客户端发送中间失败。
 3. `Retry-After` 支持整数秒与 HTTP 日期；凭证恢复时间取「上游期限 / 配置 cooldown / 已有期限」中最晚的那个，不缩短冷却。请求另受指数 backoff 控制；有备用 Provider 时不必等失败凭证的全部冷却。
 4. 唤醒或额度释放后重新申请全部 Gate，每次实际发送都计入 RPM；失败且没有可信 usage 时保留预扣 Token，不把未知消耗误退成 0。
-5. `max_provider_attempts` 是**整个请求的累计发送上限**，重排不重置；`queue.max_wait` 从首次入队计时，`request_timeout` 覆盖读取 + 全部等待 + 执行。任一预算耗尽、或重排时队列已满，就返回最终收敛错误，不无限重试。
+5. `max_provider_attempts` 是**整个请求的累计发送上限**，重排不重置；`queue.max_wait` 从首次入队计时；非流式请求的 `request_timeout` 覆盖读取 + 全部等待 + 执行，流式请求只受排队超时、`stream_ttfb_timeout` 与 `stream_idle_timeout` 约束。任一预算耗尽、或重排时队列已满，就返回最终收敛错误，不无限重试。
 6. 400/404 等不可恢复错误直接失败；结构化 `insufficient_quota` 不做短周期重试；401/403 禁用该凭证，只在还有其他可用凭证时切换。已经交付业务响应的流绝不重放。
 
 `running` 包含仍在转发的 SSE，流结束才释放槽位；排队耗时累计各轮真实等待，不含上游执行时间；一次请求无论重试几次只记一次完成审计，`attempts` 是累计次数。

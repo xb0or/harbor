@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"harbor/internal/normalize"
@@ -804,14 +805,16 @@ func (m *Manager) Routes() map[string][]ModelRoute {
 
 // Response 是统一的上游响应（内存版 / 流式版）。
 type Response struct {
-	StatusCode int
-	Header     http.Header
-	Body       []byte // 非流式响应体
-	Stream     bool
-	StreamBody io.ReadCloser // 流式响应体（调用方负责 Close）
-	Usage      Usage
-	UsageKnown bool   // 上游明确返回 usage 时为 true
-	Model      string // 上游响应体回显的模型名（非流式）
+	StatusCode  int
+	Header      http.Header
+	Body        []byte // 非流式响应体
+	Stream      bool
+	StreamBody  io.ReadCloser // 流式响应体（调用方负责 Close）
+	Usage       Usage
+	UsageKnown  bool   // 上游明确返回 usage 时为 true
+	Model       string // 上游响应体回显的模型名（非流式）
+	HeaderMs    int64  // 发出上游请求到收到响应头的耗时（毫秒）
+	ContentType string // 上游响应头 Content-Type
 }
 
 // Usage 请求的 token 用量（从响应解析）。
@@ -933,6 +936,9 @@ type Request struct {
 	Headers map[string]string // 需要透传给上游的头
 	Stream  bool
 	Timeout time.Duration // 0 = 使用 provider 默认
+	// TTFBTimeout 仅流式生效：等待上游响应头的上限（0 = 使用 provider 默认超时）。
+	// 收到响应头后立即解除，不再限制整条流的生命周期。
+	TTFBTimeout time.Duration
 }
 
 // parseRetryAfter 解析 delta-seconds / HTTP-date；无效、过期或超出 Duration 范围则忽略。
@@ -987,29 +993,54 @@ func (p *Provider) Execute(ctx context.Context, req *Request) (*Response, error)
 	if timeout == 0 {
 		timeout = snapshot.Timeout
 	}
-	// 流式请求不能套 WithTimeout：Execute 返回后 defer cancel() 会立即
-	// 取消 ctx，Transport 会关闭底层连接，导致 SSE body 只读到已缓冲的
-	// 首块数据就 EOF。流式场景的超时语义由上层负责：
-	//   - job.Ctx 总超时（含排队）取消执行
-	//   - 客户端断开 → ctx 取消 → 连接关闭 → copyStream EOF → 槽位释放
-	//   - SSE 心跳负责空闲保活
-	// 非流式请求读取在 Execute 返回前完成，provider 级超时无副作用，保留。
+	// 非流式请求在 Execute 返回前读完响应，provider 级总超时无副作用。
+	// 流式请求不能套整段 WithTimeout：Execute 返回后取消 ctx 会关闭底层连接，
+	// 导致 SSE body 只读到首块就 EOF。流式超时拆成两段：
+	//   1) TTFB：只覆盖「发出请求 → 收到响应头」，收到头即 Stop；
+	//   2) 空闲读超时：由 server.copyStream 按数据块重置。
 	if timeout > 0 && !req.Stream {
 		cctx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
 		httpReq = httpReq.WithContext(cctx)
 	}
 
+	var streamCancel context.CancelFunc
+	var ttfbTimer *time.Timer
+	var ttfbFired atomic.Bool
+	if req.Stream {
+		streamCtx, cancel := context.WithCancel(ctx)
+		streamCancel = cancel
+		httpReq = httpReq.WithContext(streamCtx)
+		ttfb := req.TTFBTimeout
+		if ttfb <= 0 {
+			ttfb = snapshot.Timeout
+		}
+		if ttfb > 0 {
+			ttfbTimer = time.AfterFunc(ttfb, func() {
+				ttfbFired.Store(true)
+				cancel()
+			})
+		}
+	}
+
 	client := upstreamHTTPClient
 	if snapshot.PublicOnly {
 		client = publicOnlyHTTPClient
 	}
+	startedAt := time.Now()
 	resp, err := client.Do(httpReq)
+	if ttfbTimer != nil {
+		ttfbTimer.Stop()
+	}
+	headerMs := time.Since(startedAt).Milliseconds()
 	if err != nil {
+		if streamCancel != nil {
+			streamCancel()
+		}
 		if resp != nil && resp.Body != nil {
 			resp.Body.Close()
 		}
-		// 连接层错误：瞬时可切换；但客户端主动取消不算上游故障
+		// 客户端/请求级取消优先判定：这种取消不是上游故障，不能冷却凭证。
 		if ctx.Err() == context.DeadlineExceeded {
 			return nil, normalize.New(normalize.ErrTimeout, "request deadline exceeded")
 		}
@@ -1019,6 +1050,15 @@ func (p *Provider) Execute(ctx context.Context, req *Request) (*Response, error)
 			he.Retryable = false
 			return nil, he
 		}
+		// TTFB 到点：明确归类为超时。
+		if ttfbFired.Load() {
+			he := normalize.New(normalize.ErrTimeout, "upstream response header timeout")
+			he.Class = normalize.ClassTimeout
+			he.Retryable = true
+			he.Provider = p.Name
+			p.markFail(cred, he.Class)
+			return nil, he
+		}
 		he := normalize.Upstream(p.Name, 0, err.Error())
 		he.Class = normalize.ClassTimeout
 		he.Retryable = true
@@ -1026,11 +1066,15 @@ func (p *Provider) Execute(ctx context.Context, req *Request) (*Response, error)
 		return nil, he
 	}
 
+	contentType := resp.Header.Get("Content-Type")
 	// 上游错误响应：读取 body 用于分类，然后标记凭证。
 	// 注意：不能 defer resp.Body.Close()——流式路径要把 body 所有权
 	// 移交给调用方（server.awaitStream 负责 Close + 释放并发槽），
 	// 提前关闭会截断 SSE 流。错误路径与非流式路径在此显式关闭。
 	if resp.StatusCode >= 400 {
+		if streamCancel != nil {
+			streamCancel()
+		}
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		resp.Body.Close()
 		he := normalize.Upstream(p.Name, resp.StatusCode, string(body))
@@ -1038,19 +1082,41 @@ func (p *Provider) Execute(ctx context.Context, req *Request) (*Response, error)
 		// 标记与 Retryable 解耦：429/5xx/timeout → 冷却；401/403 →
 		// 凭证必须禁用（即使该错误本身不可重试，禁用后下一次尝试才能
 		// 绕过坏凭证选到备用出口）。markFail 内部对未知类保守不标记。
-		// markFail 合并配置冷却与已有期限，并返回真正生效的恢复时间。
 		he.RetryAt = p.markFail(cred, he.Class, parseRetryAfter(resp.Header.Get("Retry-After"), time.Now()))
+		return nil, he
+	}
+
+	// 流式请求必须确认上游真的返回 SSE。否则普通 JSON（上游不支持 stream
+	// 或鉴权失败仍回 200）会被当作 SSE 透传，客户端解析直接失败。
+	if req.Stream && !strings.Contains(strings.ToLower(contentType), "text/event-stream") {
+		resp.Body.Close()
+		if streamCancel != nil {
+			streamCancel()
+		}
+		he := normalize.New(normalize.ErrUpstream,
+			fmt.Sprintf("upstream did not return text/event-stream (status=%d content_type=%q)", resp.StatusCode, contentType))
+		he.Class = normalize.ClassUnknown
+		he.Retryable = false
+		he.Provider = p.Name
+		he.UpstreamHTTP = resp.StatusCode
+		// 协议不匹配不是凭证故障：不冷却上游凭证，只让本次请求明确失败。
 		return nil, he
 	}
 
 	if req.Stream {
 		// 流式路径：body 所有权移交调用方（由调用方 Close），此处不关闭。
-		// 包装 body 只旁路解析 SSE usage，不修改透传字节。
+		// 包装 body 只旁路解析 SSE usage，不修改透传字节；Close 时释放 TTFB context。
+		var body io.ReadCloser = resp.Body
+		if streamCancel != nil {
+			body = &cancelOnCloseReadCloser{ReadCloser: body, cancel: streamCancel}
+		}
 		return &Response{
-			StatusCode: resp.StatusCode,
-			Header:     resp.Header,
-			Stream:     true,
-			StreamBody: newStreamUsageBody(resp.Body),
+			StatusCode:  resp.StatusCode,
+			Header:      resp.Header,
+			Stream:      true,
+			StreamBody:  newStreamUsageBody(body),
+			HeaderMs:    headerMs,
+			ContentType: contentType,
 		}, nil
 	}
 
@@ -1073,10 +1139,24 @@ func (p *Provider) Execute(ctx context.Context, req *Request) (*Response, error)
 		p.markFail(cred, he.Class)
 		return nil, he
 	}
-	out := &Response{StatusCode: resp.StatusCode, Header: resp.Header, Body: body}
+	out := &Response{StatusCode: resp.StatusCode, Header: resp.Header, Body: body, HeaderMs: headerMs, ContentType: contentType}
 	out.Usage, out.UsageKnown = parseUsage(body)
 	out.Model = parseModelName(body)
 	return out, nil
+}
+
+// cancelOnCloseReadCloser 在流式响应体关闭时释放 TTFB 派生 context，
+// 确保上游连接不会因为 context 永远不取消而滞留。
+type cancelOnCloseReadCloser struct {
+	io.ReadCloser
+	once   sync.Once
+	cancel context.CancelFunc
+}
+
+func (c *cancelOnCloseReadCloser) Close() error {
+	err := c.ReadCloser.Close()
+	c.once.Do(c.cancel)
+	return err
 }
 
 // parseModelName 读取响应体里的 model 字段（上游实际使用的模型）。

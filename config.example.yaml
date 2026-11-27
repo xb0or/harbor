@@ -11,14 +11,24 @@ server:
 queue:
   max_wait: 120s        # 排队最长等待，超过返回 429
   max_depth: 200        # 队列容量
-  keepalive: 15s        # 排队期间 SSE 心跳间隔
+  keepalive: 15s        # 旧字段：仅当 keepalive.enabled=true 且未配置 keepalive.interval 时生效
   expose_queue_position: true
 
 limits:
   max_provider_attempts: 3    # 单个请求最多尝试上游次数
-  request_timeout: 120s       # 单个请求总超时（含排队）
+  request_timeout: 120s       # 非流式请求总超时（含排队）；流式请求不套此总超时
+  stream_ttfb_timeout: 60s    # 流式：等待上游响应头的上限
+  stream_idle_timeout: 120s   # 流式：两次上游数据之间的空闲上限（0=关闭）
   backoff_base: 500ms         # 重试退避基数
   provider_cooldown: 30s      # 上游失败后的冷却时间
+
+# SSE 心跳保活（默认关闭；显式 enabled: true 才发送）。
+# 仅在空闲超过 interval 且当前处于完整 SSE 事件边界时插入注释帧。
+keepalive:
+  enabled: false
+  interval: 15s
+  style: comment
+  comment: keepalive
 
 providers:
   - name: openai

@@ -68,7 +68,7 @@ func TestSub2APIResponsesDelayedHTTPFailure(t *testing.T) {
 			ups := httptest.NewServer(mock.Handler())
 			defer ups.Close()
 			cfg := testConfig()
-			cfg.Queue.Keepalive = "5ms"
+			cfg.Keepalive.Interval = "5ms"
 			cfg.Limits.MaxProviderAttempts = 1
 			handler, _, _ := buildTestServer(t, cfg, ups)
 			ts := httptest.NewServer(handler)

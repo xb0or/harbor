@@ -152,9 +152,13 @@ func buildTestServer(t *testing.T, cfg *config.Config, up *httptest.Server) (htt
 }
 
 func testConfig() *config.Config {
+	// 测试默认显式开启心跳（生产默认关闭）：多条排队/延迟失败回归用例
+	// 依赖首帧注释提交 SSE。需要验证静默行为的用例会自行关闭。
+	on := true
 	cfg := &config.Config{
-		Server: config.ServerConfig{Listen: "127.0.0.1:0", MaxBodySize: "20mb"},
-		Queue:  config.QueueConfig{MaxWait: "30s", MaxDepth: 200, Keepalive: "100ms", ExposeQueuePosition: true},
+		Server:    config.ServerConfig{Listen: "127.0.0.1:0", MaxBodySize: "20mb"},
+		Queue:     config.QueueConfig{MaxWait: "30s", MaxDepth: 200, Keepalive: "100ms", ExposeQueuePosition: true},
+		Keepalive: config.KeepaliveConfig{Enabled: &on, Interval: "100ms", Style: "comment", Comment: "keepalive"},
 		Limits: config.RetryLimitsConfig{
 			MaxProviderAttempts: 2,
 			RequestTimeout:      "30s",
@@ -521,7 +525,7 @@ func TestStreamUpstreamErrorReturnsJSON(t *testing.T) {
 	defer ups.Close()
 
 	cfg := testConfig()
-	cfg.Queue.Keepalive = "30s"
+	cfg.Keepalive.Interval = "30s"
 	handler, _, _ := buildTestServer(t, cfg, ups)
 	ts := httptest.NewServer(handler)
 	defer ts.Close()

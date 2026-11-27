@@ -29,6 +29,10 @@ kill_timeout = 90
   auto_start_machines = true
   min_machines_running = 1
 
+  # SSE 长连接：Fly 边缘空闲超时放宽到 300s；业务侧仍有 stream_idle_timeout 兜底。
+  [http_service.http_options]
+    idle_timeout = 300
+
   [http_service.concurrency]
     # SSE 长连接按请求计数，阈值放宽避免误判过载
     type = "requests"

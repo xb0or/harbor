@@ -104,7 +104,10 @@ func (d *DB) Migrate() error {
 			upstream_request_id TEXT,
 			cached_tokens INTEGER NOT NULL DEFAULT 0,
 			stream INTEGER NOT NULL DEFAULT 0,
-			cache_write_tokens INTEGER NOT NULL DEFAULT 0
+			cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+			inbound_path TEXT,
+			upstream_header_ms INTEGER NOT NULL DEFAULT 0,
+			upstream_content_type TEXT
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_requests_finished ON requests(finished_at DESC)`,
 		`CREATE TABLE IF NOT EXISTS provider_credentials (
@@ -183,6 +186,9 @@ func (d *DB) Migrate() error {
 	}
 	if err := d.migrateRequestsUpstreamError(); err != nil {
 		return fmt.Errorf("migrate requests upstream error: %w", err)
+	}
+	if err := d.migrateRequestsStreamMeta(); err != nil {
+		return fmt.Errorf("migrate requests stream meta: %w", err)
 	}
 	return nil
 }
@@ -615,6 +621,32 @@ func (d *DB) migrateRequestsUpstreamError() error {
 	return nil
 }
 
+// migrateRequestsStreamMeta 补齐流式链路观测列（入站路径 / 上游响应头耗时 / Content-Type）。
+// 逐列检查并 ALTER，兼容任意历史版本且不丢已有审计记录。
+func (d *DB) migrateRequestsStreamMeta() error {
+	columns, err := tableColumns(d.sql, "requests")
+	if err != nil {
+		return err
+	}
+	adds := []struct {
+		name string
+		def  string
+	}{
+		{"inbound_path", "TEXT"},
+		{"upstream_header_ms", "INTEGER NOT NULL DEFAULT 0"},
+		{"upstream_content_type", "TEXT"},
+	}
+	for _, add := range adds {
+		if columns[add.name] {
+			continue
+		}
+		if _, err := d.sql.Exec(`ALTER TABLE requests ADD COLUMN ` + add.name + ` ` + add.def); err != nil {
+			return fmt.Errorf("migrate requests stream meta (%s): %w", add.name, err)
+		}
+	}
+	return nil
+}
+
 // --- requests ---
 
 // Request 是单请求审计记录（对应 requests 表）。
@@ -647,6 +679,10 @@ type Request struct {
 	CachedTokens      int    `json:"cached_tokens,omitempty"`
 	CachedWriteTokens int    `json:"cache_write_tokens,omitempty"`
 	Stream            bool   `json:"stream,omitempty"`
+	// 流式链路观测（2026-11 新增）。
+	InboundPath         string `json:"inbound_path,omitempty"`
+	UpstreamHeaderMs    int64  `json:"upstream_header_ms,omitempty"`
+	UpstreamContentType string `json:"upstream_content_type,omitempty"`
 }
 
 // RecordRequest 写入一条请求记录（按 request_id 幂等覆盖）。
@@ -659,8 +695,9 @@ func (d *DB) RecordRequest(r *Request) error {
 			upstream_code, upstream_type, upstream_http, error_detail,
 			queued_at, started_at, finished_at, queue_wait_ms, attempts,
 			tokens_in, tokens_out, client_ua, client_ip, upstream_model, first_token_ms,
-			response_model, upstream_request_id, cached_tokens, cache_write_tokens, stream)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			response_model, upstream_request_id, cached_tokens, cache_write_tokens, stream,
+			inbound_path, upstream_header_ms, upstream_content_type)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(request_id) DO UPDATE SET
 			status=excluded.status, error_code=excluded.error_code,
 			upstream_code=excluded.upstream_code, upstream_type=excluded.upstream_type,
@@ -672,7 +709,9 @@ func (d *DB) RecordRequest(r *Request) error {
 			upstream_model=excluded.upstream_model, first_token_ms=excluded.first_token_ms,
 			response_model=excluded.response_model, upstream_request_id=excluded.upstream_request_id,
 			cached_tokens=excluded.cached_tokens, cache_write_tokens=excluded.cache_write_tokens,
-			stream=excluded.stream,
+			stream=excluded.stream, inbound_path=excluded.inbound_path,
+			upstream_header_ms=excluded.upstream_header_ms,
+			upstream_content_type=excluded.upstream_content_type,
 			provider=excluded.provider`,
 		r.RequestID, r.KeyID, r.Model, nullStr(r.Provider), r.Status, nullStr(r.ErrorCode),
 		nullStr(r.UpstreamCode), nullStr(r.UpstreamType), r.UpstreamHTTP, nullStr(r.ErrorDetail),
@@ -680,6 +719,7 @@ func (d *DB) RecordRequest(r *Request) error {
 		r.QueueWaitMs, r.Attempts, r.TokensIn, r.TokensOut,
 		nullStr(r.ClientUA), nullStr(r.ClientIP), nullStr(r.UpstreamModel), r.FirstTokenMs,
 		nullStr(r.ResponseModel), nullStr(r.UpstreamRequestID), r.CachedTokens, r.CachedWriteTokens, boolInt(r.Stream),
+		nullStr(r.InboundPath), r.UpstreamHeaderMs, nullStr(r.UpstreamContentType),
 	)
 	if err != nil {
 		return fmt.Errorf("record request: %w", err)
@@ -694,7 +734,8 @@ func (d *DB) GetRequest(id string) (*Request, error) {
 			upstream_code, upstream_type, upstream_http, error_detail,
 			queued_at, started_at, finished_at, queue_wait_ms, attempts,
 			tokens_in, tokens_out, client_ua, client_ip, upstream_model, first_token_ms,
-			response_model, upstream_request_id, cached_tokens, cache_write_tokens, stream
+			response_model, upstream_request_id, cached_tokens, cache_write_tokens, stream,
+			inbound_path, upstream_header_ms, upstream_content_type
 		FROM requests WHERE request_id = ?`, id)
 	return scanRequest(row)
 }
@@ -789,7 +830,8 @@ func (d *DB) ListRequests(f RequestFilter) ([]*Request, int, error) {
 			upstream_code, upstream_type, upstream_http, error_detail,
 			queued_at, started_at, finished_at, queue_wait_ms, attempts,
 			tokens_in, tokens_out, client_ua, client_ip, upstream_model, first_token_ms,
-			response_model, upstream_request_id, cached_tokens, cache_write_tokens, stream
+			response_model, upstream_request_id, cached_tokens, cache_write_tokens, stream,
+			inbound_path, upstream_header_ms, upstream_content_type
 		FROM requests WHERE `+clause+` ORDER BY finished_at DESC LIMIT ? OFFSET ?`, queryArgs...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("list requests: %w", err)
@@ -841,12 +883,16 @@ func scanRequest(r rowScanner) (*Request, error) {
 		cachedTok     int
 		cacheWriteTok int
 		streamFlag    int
+		inboundPath   sql.NullString
+		upHeaderMs    int64
+		upContentType sql.NullString
 	)
 	err := r.Scan(&x.RequestID, &x.KeyID, &x.Model, &provider, &x.Status, &errorCode,
 		&upCode, &upType, &upHTTP, &detail,
 		&x.QueuedAt, &startedAt, &finishedAt, &queueWait, &attempts,
 		&tokensIn, &tokensOut, &clientUA, &clientIP, &upModel, &firstMs,
-		&respModel, &upReqID, &cachedTok, &cacheWriteTok, &streamFlag)
+		&respModel, &upReqID, &cachedTok, &cacheWriteTok, &streamFlag,
+		&inboundPath, &upHeaderMs, &upContentType)
 	if err != nil {
 		return nil, err
 	}
@@ -871,6 +917,9 @@ func scanRequest(r rowScanner) (*Request, error) {
 	x.CachedTokens = cachedTok
 	x.CachedWriteTokens = cacheWriteTok
 	x.Stream = streamFlag != 0
+	x.InboundPath = inboundPath.String
+	x.UpstreamHeaderMs = upHeaderMs
+	x.UpstreamContentType = upContentType.String
 	return &x, nil
 }
 

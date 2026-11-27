@@ -51,6 +51,9 @@ type Result struct {
 	ResponseModel     string // 上游响应体回显的模型名
 	CachedTokens      int    // 命中缓存的输入 token
 	CachedWriteTokens int    // 写入缓存的 token
+	// 上游链路耗时/类型（审计用）。
+	UpstreamHeaderMs    int64
+	UpstreamContentType string
 }
 
 // ProviderLease 是 Scheduler 已获取全部额度的 Provider 租约。
@@ -196,6 +199,8 @@ func fillResultMeta(res *Result, resp *provider.Response) {
 	res.ResponseModel = resp.Model
 	res.CachedTokens = resp.Usage.CachedTokens
 	res.CachedWriteTokens = resp.Usage.CachedWriteTokens
+	res.UpstreamHeaderMs = resp.HeaderMs
+	res.UpstreamContentType = resp.ContentType
 }
 
 func (e *Executor) execute(ctx context.Context, model string, req *provider.Request, p *provider.Provider) (*provider.Response, error) {

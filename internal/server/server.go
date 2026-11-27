@@ -10,6 +10,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -61,6 +62,9 @@ type Server struct {
 	// 热更新后的请求总超时与排队位置头开关。
 	requestTimeoutNs atomic.Int64
 	exposeQueuePos   atomic.Bool
+	// 流式链路独立超时：上游响应头（TTFB）与流转发空闲读。
+	streamTTFBNs atomic.Int64
+	streamIdleNs atomic.Int64
 
 	reqSeq atomic.Uint64
 
@@ -109,6 +113,10 @@ type RequestLog struct {
 	UpstreamRequestID string `json:"upstream_request_id,omitempty"`
 	CachedTokens      int    `json:"cached_tokens,omitempty"`
 	CachedWriteTokens int    `json:"cache_write_tokens,omitempty"`
+	// 链路观测（2026-11 新增）
+	InboundPath         string `json:"inbound_path,omitempty"`          // 真实入站路径
+	UpstreamHeaderMs    int64  `json:"upstream_header_ms,omitempty"`    // 上游响应头耗时
+	UpstreamContentType string `json:"upstream_content_type,omitempty"` // 上游 Content-Type
 }
 
 // New 构造 Server。store 为 nil 时运行纯内存模式（P0 行为）。
@@ -138,6 +146,8 @@ func New(cfg *config.Config, keys *key.Store, mgr *provider.Manager, exec *execu
 	sched.SetEarlyWait(cfg.Queue.Early429AfterDuration())
 	sched.OnFinished = s.onFinished
 	s.requestTimeoutNs.Store(int64(cfg.Limits.RequestTimeoutDuration()))
+	s.streamTTFBNs.Store(int64(cfg.Limits.StreamTTFBTimeoutDuration()))
+	s.streamIdleNs.Store(int64(cfg.Limits.StreamIdleTimeoutDuration()))
 	s.exposeQueuePos.Store(cfg.Queue.ExposeQueuePosition)
 	return s
 }
@@ -217,9 +227,10 @@ func (s *Server) handleOpenAI(inboundPath string) http.HandlerFunc {
 			return
 		}
 
-		// 2. 请求级总超时（含请求体读取、排队 + 执行）
-		ctx, cancel := context.WithTimeout(r.Context(), time.Duration(s.requestTimeoutNs.Load()))
-		defer cancel()
+		// 2. 读取阶段的预算：非流式请求复用这个 context 作为整段总超时；
+		//    流式请求在解析出 stream 标志后立即取消它，避免总超时截断长流。
+		readCtx, readCancel := context.WithTimeout(r.Context(), time.Duration(s.requestTimeoutNs.Load()))
+		defer readCancel()
 
 		// 3. 读取受限请求体，并用全局字节预算限制驻留内存。
 		maxBody := s.cfg.Server.MaxBodySizeBytes()
@@ -231,7 +242,7 @@ func (s *Server) handleOpenAI(inboundPath string) http.HandlerFunc {
 		if r.ContentLength >= 0 && r.ContentLength < reservation {
 			reservation = r.ContentLength
 		}
-		reservedUnits, ok := s.bodyBudget.Acquire(ctx, reservation)
+		reservedUnits, ok := s.bodyBudget.Acquire(readCtx, reservation)
 		if !ok {
 			s.writeError(w, requestID, normalize.New(normalize.ErrRateLimited, "request body capacity exhausted"))
 			return
@@ -291,7 +302,23 @@ func (s *Server) handleOpenAI(inboundPath string) http.HandlerFunc {
 			return
 		}
 
-		// 4. 模型校验（路由存在 + Key 允许）
+		// 4. 超时模型：
+		//   - 非流式：保留 requestTimeout 总超时（覆盖排队 + 执行 + 读响应）；
+		//   - 流式：只继承 r.Context()，由排队超时（queue.max_wait）、
+		//     上游 TTFB（provider.Execute）与流转发空闲超时（copyStream）分段控制。
+		//     绝不套固定总超时，否则长回答会在生成中途被截断。
+		ctx := r.Context()
+		cancel := func() {}
+		if !meta.Stream {
+			// 非流式沿用读取阶段创建的总超时（覆盖排队 + 执行 + 读响应）。
+			ctx, cancel = readCtx, readCancel
+		} else {
+			// 流式显式结束读取阶段的计时器；之后由排队/TTFB/空闲超时控制。
+			readCancel()
+		}
+		defer cancel()
+
+		// 5. 模型校验（路由存在 + Key 允许）
 		if len(s.mgr.ModelProviders(meta.Model)) == 0 {
 			s.record(r, k, requestID, meta.Model, meta.Stream, "error", "model_forbidden", start, 0, 0, 0)
 			s.writeError(w, requestID, normalize.New(normalize.ErrModelForbidden, "model "+meta.Model+" has no route"))
@@ -303,11 +330,12 @@ func (s *Server) handleOpenAI(inboundPath string) http.HandlerFunc {
 			return
 		}
 
-		// 5. 构造上游请求（responses/messages 已桥成 chat/completions）
+		// 6. 构造上游请求（responses/messages 已桥成 chat/completions）
 		upReq := &provider.Request{
-			Path:   upstreamPath,
-			Body:   body,
-			Stream: meta.Stream,
+			Path:        upstreamPath,
+			Body:        body,
+			Stream:      meta.Stream,
+			TTFBTimeout: time.Duration(s.streamTTFBNs.Load()),
 		}
 
 		lease := s.newProviderLease(meta.Model)
@@ -334,6 +362,7 @@ func (s *Server) handleOpenAI(inboundPath string) http.HandlerFunc {
 					Attempt: res.Attempts, RequeueAt: res.RequeueAt, Provider: res.Provider,
 					UpstreamRequestID: res.UpstreamRequestID, ResponseModel: res.ResponseModel, CachedTokens: res.CachedTokens,
 					CachedWriteTokens: res.CachedWriteTokens,
+					UpstreamHeaderMs:  res.UpstreamHeaderMs, UpstreamContentType: res.UpstreamContentType,
 				}
 				if res.Err != nil {
 					if !res.RequeueAt.IsZero() {
@@ -423,15 +452,11 @@ func (s *Server) discardJobResult(job *queue.Job) {
 	}()
 }
 
-// awaitStream 流式请求：排队期间按 keepalive 发 SSE 心跳，结果到达后逐行转发。
-// 在第一个心跳或成功结果之前不提交 SSE 头：上游很快失败时改走 JSON 502，
-// 避免客户端已经按 SSE 解析后把 error 对象插成 [object Object]。
+// awaitStream 流式请求：排队期间按显式开启的 keepalive 发 SSE 心跳，
+// 结果到达后逐帧转发。在第一个心跳或成功结果之前不提交 SSE 头：
+// 上游很快失败时改走 JSON 502，避免客户端已按 SSE 解析后把 error 对象插成 [object Object]。
 func (s *Server) awaitStream(w http.ResponseWriter, r *http.Request, job *queue.Job, requestID, model string, k *key.Key, start time.Time) {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		s.writeError(w, requestID, normalize.New(normalize.ErrInternal, "streaming unsupported"))
-		return
-	}
+	rc := http.NewResponseController(w)
 
 	// 排队心跳：首帧延迟到「早退阈值 + 1s」之后。
 	// 早退阈值之前不提交 SSE，排队失败（提前 429）才能保持干净的 HTTP 状态码；
@@ -454,13 +479,14 @@ func (s *Server) awaitStream(w http.ResponseWriter, r *http.Request, job *queue.
 		if sseStarted {
 			return
 		}
-		w.Header().Set("Content-Type", "text/event-stream")
+		sseStarted = true
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 		// 禁止中间代理对 SSE 再压缩或转换，避免逐块 Flush 后仍被攒成整段。
 		w.Header().Set("Cache-Control", "no-cache, no-transform")
-		w.Header().Set("Connection", "keep-alive")
 		w.Header().Set("X-Accel-Buffering", "no")
-		flusher.Flush()
-		sseStarted = true
+		// 不设 Connection：HTTP/2 禁止连接级头，且 SSE 靠 Content-Type 与分块传输保活。
+		w.WriteHeader(http.StatusOK)
+		_ = rc.Flush()
 	}
 	fail := func(res *queue.Result) {
 		s.stats.RecordRequest(res.Queued, res.QueueWait(), false,
@@ -487,7 +513,7 @@ func (s *Server) awaitStream(w http.ResponseWriter, r *http.Request, job *queue.
 			// Chat clients expect ordinary data with a string message.
 			_, _ = fmt.Fprintf(w, "data: %s\n\n", normalize.StreamDataWithRequestID(res.Err, requestID))
 		}
-		flusher.Flush()
+		_ = rc.Flush()
 	}
 
 	for {
@@ -497,56 +523,13 @@ func (s *Server) awaitStream(w http.ResponseWriter, r *http.Request, job *queue.
 				fail(res)
 				return
 			}
-
 			startSSE()
-			// 成功：转发流；流结束后释放并发槽（覆盖流全程）。
-			if res.Stream != nil {
-				streamStop := make(chan struct{})
-				go func(stream io.Closer) {
-					select {
-					case <-r.Context().Done():
-						_ = stream.Close()
-					case <-streamStop:
-					}
-				}(res.Stream)
-				defer func() {
-					close(streamStop)
-					_ = res.Stream.Close()
-					s.sched.ReleaseJob(job)
-				}()
-				streamErr := s.copyStream(job.Ctx, w, res.Stream, flusher, func() {
-					res.FirstTokenMs = time.Since(start).Milliseconds()
-				})
-				s.applyStreamUsage(job, res)
-				if streamErr != nil {
-					res.Err = normalize.New(normalize.ErrUpstream, "upstream stream failed or was interrupted")
-					if job.Ctx.Err() == context.DeadlineExceeded {
-						res.Err = normalize.New(normalize.ErrTimeout, "stream deadline exceeded")
-					}
-					s.log.Warn("stream failed", "request_id", requestID, "code", res.Err.Code)
-				}
-			} else {
-				if _, err := w.Write(res.Body); err != nil {
-					res.Err = normalize.New(normalize.ErrUpstream, "response write failed")
-				}
-				flusher.Flush()
-			}
-			s.stats.RecordRequest(res.Queued, res.QueueWait(), res.Err == nil,
-				res.Usage.Prompt, res.Usage.Completion, res.Usage.Total)
-			if r.Context().Err() != nil {
-				s.record(r, k, requestID, model, true, "cancelled", "client_disconnected", start,
-					res.Usage.Prompt, res.Usage.Completion, res.Usage.Total)
-			} else {
-				s.recordResult(r, k, requestID, model, true, res, start)
-			}
-			if res.Stream == nil {
-				s.sched.ReleaseJob(job)
-			}
+			s.forwardStream(w, r, rc, job, res, requestID, model, k, start)
 			return
 		case <-hbC:
 			startSSE()
 			_, _ = io.WriteString(w, ka.Frame())
-			flusher.Flush()
+			_ = rc.Flush()
 			hb.Reset(ka.IntervalDuration())
 		case <-r.Context().Done():
 			s.sched.Cancel(job.ID)
@@ -557,24 +540,150 @@ func (s *Server) awaitStream(w http.ResponseWriter, r *http.Request, job *queue.
 	}
 }
 
-// copyStream 转发 SSE 字节；空闲超过心跳间隔时向下游补一个空事件，
-// 保证长连接上始终有数据流动，避免代理或客户端空闲超时把连接掐断。
-func (s *Server) copyStream(ctx context.Context, w http.ResponseWriter, src io.Reader, flusher http.Flusher, onFirst func()) error {
-	ka := s.keepaliveConfig()
-	if !ka.IsEnabled() {
-		return copyStreamPlain(w, src, flusher, onFirst)
+// forwardStream 在一段已获得所有权的上游流上完成转发、用量结算与审计。
+// 任何退出路径都关闭上游 Body 并释放并发槽，绝不把连接/槽位留在后台。
+func (s *Server) forwardStream(w http.ResponseWriter, r *http.Request, rc *http.ResponseController, job *queue.Job, res *queue.Result, requestID, model string, k *key.Key, start time.Time) {
+	defer func() {
+		if res.Stream != nil {
+			_ = res.Stream.Close()
+		}
+		s.sched.ReleaseJob(job)
+	}()
+
+	var streamErr error
+	if res.Stream != nil {
+		frames, stopEarly := compat.TerminalFrames(r.URL.Path)
+		streamErr = s.copyStream(r.Context(), w, res.Stream, rc, func() {
+			res.FirstTokenMs = time.Since(start).Milliseconds()
+		}, terminalFrames{frames: frames, stopEarly: stopEarly})
+		s.applyStreamUsage(job, res)
+	} else {
+		if _, err := w.Write(res.Body); err != nil {
+			res.Err = normalize.New(normalize.ErrUpstream, "response write failed")
+		}
+		_ = rc.Flush()
 	}
+
+	// 结束判定只看 copyStream 的结果：正常结束（EOF 或已写出 [DONE]）即成功。
+	// 不能事后再查 r.Context()——客户端收到 [DONE] 后通常立即断开，
+	// 那时上下文已取消，但这次请求是完整交付的。
+	clientGone := false
+	switch {
+	case streamErr == nil:
+	case errors.Is(streamErr, errStreamIdle):
+		res.Err = normalize.New(normalize.ErrTimeout, "upstream stream idle timeout")
+		s.log.Warn("stream idle timeout", "request_id", requestID, "model", model)
+	case errors.Is(streamErr, errDownstreamWrite) || r.Context().Err() != nil:
+		// 客户端在流结束前断开：copyStream 已关闭上游 Body，槽位由 defer 释放。
+		clientGone = true
+	default:
+		res.Err = normalize.New(normalize.ErrUpstream, "upstream stream failed or was interrupted")
+		s.log.Warn("stream failed", "request_id", requestID, "code", res.Err.Code, "err", streamErr.Error())
+	}
+
+	s.stats.RecordRequest(res.Queued, res.QueueWait(), res.Err == nil && !clientGone,
+		res.Usage.Prompt, res.Usage.Completion, res.Usage.Total)
+	if clientGone {
+		s.record(r, k, requestID, model, true, "cancelled", "client_disconnected", start,
+			res.Usage.Prompt, res.Usage.Completion, res.Usage.Total)
+		return
+	}
+	s.recordResult(r, k, requestID, model, true, res, start)
+}
+
+// errStreamIdle 表示上游在空闲超时内没有任何新数据。
+var errStreamIdle = errors.New("upstream stream idle timeout")
+
+// errDownstreamWrite 表示向客户端写数据失败（客户端已断开）。
+var errDownstreamWrite = errors.New("downstream write failed")
+
+// terminalFrames / terminalScan 对齐 agent2api `api::pipeline::TerminalScan`：
+// 用滑动窗口（最长特征 - 1 字节）跨 chunk 匹配收尾帧，避免收尾帧被 TCP 分片
+// 切开时漏判；`contains` 而不是 `HasSuffix`，因为一帧后面可能还跟着别的字节。
+type terminalFrames struct {
+	frames    []string
+	stopEarly bool
+}
+
+type terminalScan struct {
+	frames []string
+	window []byte
+	seen   bool
+}
+
+func newTerminalScan(tf terminalFrames) *terminalScan {
+	if len(tf.frames) == 0 {
+		return nil
+	}
+	return &terminalScan{frames: tf.frames}
+}
+
+func (s *terminalScan) push(chunk []byte) bool {
+	if s == nil || s.seen {
+		return false
+	}
+	s.window = append(s.window, chunk...)
+	longest := 0
+	for _, frame := range s.frames {
+		if len(frame) > longest {
+			longest = len(frame)
+		}
+		if bytes.Contains(s.window, []byte(frame)) {
+			s.seen = true
+		}
+	}
+	if keep := longest - 1; keep >= 0 && len(s.window) > keep {
+		s.window = append(s.window[:0], s.window[len(s.window)-keep:]...)
+	}
+	return s.seen
+}
+
+// sseDoneMarkers 是 OpenAI 兼容流的终止事件（含 CRLF 变体）。
+var sseDoneMarkers = []string{
+	"data: [DONE]\n\n", "data:[DONE]\n\n",
+	"data: [DONE]\r\n\r\n", "data:[DONE]\r\n\r\n",
+}
+
+// sseDoneLines 是只写出了 [DONE] 行、尚缺结尾空行的状态 → 需要补写的结尾。
+// 上游或按行处理的管道可能把 "data: [DONE]\n" 与空行拆成两次写出；
+// 客户端通常读到这一行就断开，因此这一行写出即视为终止事件已交付。
+var sseDoneLines = []struct{ line, terminator string }{
+	{"data: [DONE]\r\n", "\r\n"}, {"data:[DONE]\r\n", "\r\n"},
+	{"data: [DONE]\n", "\n"}, {"data:[DONE]\n", "\n"},
+}
+
+// copyStream 逐块转发 SSE 字节：
+//   - 已向客户端写出完整 `data: [DONE]` 事件即视为正常结束，立刻关闭上游，
+//     不再等待上游 EOF（部分上游 [DONE] 后不立即断开，客户端也常在此时关闭连接）；
+//   - 每收到一块上游数据即重置空闲读计时器；空闲到点或客户端断开时
+//     立即关闭上游 Body，让阻塞中的 Read 返回并释放并发槽；
+//   - 心跳仅在显式开启时才发送，且必须落在完整 SSE 事件边界（\n\n），
+//     避免注释帧被拼进半行 data 造成 JSON 截断。
+func (s *Server) copyStream(ctx context.Context, w io.Writer, src io.ReadCloser, rc *http.ResponseController, onFirst func(), terminals ...terminalFrames) error {
+	ka := s.keepaliveConfig()
+	keepalive := ka.IsEnabled()
 	interval := ka.IntervalDuration()
 	frame := ka.Frame()
+	idle := time.Duration(s.streamIdleNs.Load())
+	var scan *terminalScan
+	stopEarly := false
+	if len(terminals) > 0 {
+		scan = newTerminalScan(terminals[0])
+		stopEarly = terminals[0].stopEarly
+	}
 
 	// chunks 必须无缓冲：保证「先投递数据块、再投递 EOF」的顺序，
 	// 否则两个通道同时就绪时 select 可能先取走 EOF 而丢掉最后一块数据。
 	chunks := make(chan []byte)
 	errs := make(chan error, 1)
 	done := make(chan struct{})
+	var closeOnce sync.Once
+	closeSrc := func() { closeOnce.Do(func() { _ = src.Close() }) }
 	defer close(done)
+	defer closeSrc()
+
 	go func() {
-		br := bufio.NewReader(src)
+		br := bufio.NewReaderSize(src, 32<<10)
 		for {
 			buf := make([]byte, 4096)
 			n, err := br.Read(buf)
@@ -595,16 +704,18 @@ func (s *Server) copyStream(ctx context.Context, w http.ResponseWriter, src io.R
 		}
 	}()
 
-	// tail 记录已写出的最后 4 个字节：只有上一个 SSE 事件完整结束
-	// （\n\n 或 \r\n\r\n）时才能插入心跳。否则注释会被拼进半行
-	// data（例如 "…\"he: keepalive"），事件被截断、JSON 解析失败。
-	tail := make([]byte, 0, 4)
+	// tail 记录已写出的最后若干字节：用于判断 SSE 事件边界（心跳插入点）
+	// 以及是否已写出终止事件 [DONE]。
+	const tailSize = 24
+	tail := make([]byte, 0, tailSize)
 	appendTail := func(b []byte) {
-		for _, c := range b {
-			tail = append(tail, c)
-			if len(tail) > 4 {
-				tail = tail[1:]
-			}
+		if len(b) >= tailSize {
+			tail = append(tail[:0], b[len(b)-tailSize:]...)
+			return
+		}
+		tail = append(tail, b...)
+		if over := len(tail) - tailSize; over > 0 {
+			tail = append(tail[:0], tail[over:]...)
 		}
 	}
 	atEventBoundary := func() bool {
@@ -620,6 +731,26 @@ func (s *Server) copyStream(ctx context.Context, w http.ResponseWriter, src io.R
 		}
 		return false
 	}
+	doneWritten := func() bool {
+		for _, marker := range sseDoneMarkers {
+			if bytes.HasSuffix(tail, []byte(marker)) {
+				return true
+			}
+		}
+		return false
+	}
+	// doneLineWritten 返回 [DONE] 行已写出但缺少结尾空行时应补写的内容。
+	doneLineWritten := func() (string, bool) {
+		if doneWritten() {
+			return "", false
+		}
+		for _, d := range sseDoneLines {
+			if bytes.HasSuffix(tail, []byte(d.line)) {
+				return d.terminator, true
+			}
+		}
+		return "", false
+	}
 	boundaryRetry := 200 * time.Millisecond
 	if interval < boundaryRetry {
 		boundaryRetry = interval / 2
@@ -628,8 +759,21 @@ func (s *Server) copyStream(ctx context.Context, w http.ResponseWriter, src io.R
 		boundaryRetry = 10 * time.Millisecond
 	}
 
-	timer := time.NewTimer(interval)
-	defer timer.Stop()
+	var kaTimer *time.Timer
+	var kaC <-chan time.Time
+	if keepalive {
+		kaTimer = time.NewTimer(interval)
+		kaC = kaTimer.C
+		defer kaTimer.Stop()
+	}
+	var idleTimer *time.Timer
+	var idleC <-chan time.Time
+	if idle > 0 {
+		idleTimer = time.NewTimer(idle)
+		idleC = idleTimer.C
+		defer idleTimer.Stop()
+	}
+
 	for {
 		select {
 		case b := <-chunks:
@@ -638,54 +782,74 @@ func (s *Server) copyStream(ctx context.Context, w http.ResponseWriter, src io.R
 				onFirst = nil
 			}
 			if _, err := w.Write(b); err != nil {
-				return err
+				closeSrc()
+				return fmt.Errorf("%w: %v", errDownstreamWrite, err)
 			}
 			appendTail(b)
-			flusher.Flush()
-			resetIdleTimer(timer, interval)
+			_ = rc.Flush()
+			scan.push(b)
+			if doneWritten() {
+				// 终止事件已交付：结束转发并释放上游连接与并发槽。
+				return nil
+			}
+			if terminator, ok := doneLineWritten(); ok {
+				// [DONE] 行已交付：自行补齐结尾空行，不再等待上游的后续字节。
+				// 客户端此时可能已断开，补写失败不影响「已完整交付」的判定。
+				_, _ = io.WriteString(w, terminator)
+				_ = rc.Flush()
+				return nil
+			}
+			if stopEarly && scan != nil && scan.seen {
+				// Chat 的 data: [DONE] 行就是完整事件；Responses/Anthropic
+				// 的收尾是两行，提前停会截断 data 行，故只对 Chat 生效。
+				return nil
+			}
+			if idleTimer != nil {
+				resetIdleTimer(idleTimer, idle)
+			}
+			if kaTimer != nil {
+				resetIdleTimer(kaTimer, interval)
+			}
 		case err := <-errs:
 			if err == io.EOF {
 				return nil
 			}
 			return err
-		case <-timer.C:
+		case <-idleC:
+			closeSrc()
+			return errStreamIdle
+		case <-kaC:
 			if !atEventBoundary() {
 				// 上游正处在一个事件中间：先等它写完这条事件再补心跳。
-				timer.Reset(boundaryRetry)
+				kaTimer.Reset(boundaryRetry)
 				continue
 			}
 			if _, err := io.WriteString(w, frame); err != nil {
-				return err
+				closeSrc()
+				return fmt.Errorf("%w: %v", errDownstreamWrite, err)
 			}
-			flusher.Flush()
-			timer.Reset(interval)
+			_ = rc.Flush()
+			kaTimer.Reset(interval)
 		case <-ctx.Done():
+			// 已交付本协议收尾帧（或 Chat 的 [DONE] 行），或与上游 EOF 同时就绪时，
+			// 认定为正常结束：EOF 晚于最后一块数据投递，说明客户端已收到全部内容。
+			if (scan != nil && scan.seen) || doneWritten() {
+				closeSrc()
+				return nil
+			}
+			if _, ok := doneLineWritten(); ok {
+				closeSrc()
+				return nil
+			}
+			select {
+			case err := <-errs:
+				if err == io.EOF {
+					return nil
+				}
+			default:
+			}
+			closeSrc()
 			return ctx.Err()
-		}
-	}
-}
-
-// copyStreamPlain 原样转发（心跳关闭时使用），保留读取/写入错误供审计区分。
-func copyStreamPlain(w http.ResponseWriter, src io.Reader, flusher http.Flusher, onFirst func()) error {
-	br := bufio.NewReader(src)
-	buf := make([]byte, 4096)
-	for {
-		n, err := br.Read(buf)
-		if n > 0 {
-			if onFirst != nil {
-				onFirst()
-				onFirst = nil
-			}
-			if _, werr := w.Write(buf[:n]); werr != nil {
-				return werr
-			}
-			flusher.Flush()
-		}
-		if err == io.EOF {
-			return nil
-		}
-		if err != nil {
-			return err
 		}
 	}
 }
@@ -1136,18 +1300,19 @@ func (s *Server) writeError(w http.ResponseWriter, requestID string, he *normali
 // record 记录未产生 queue.Result 的请求（鉴权/校验失败等）。
 func (s *Server) record(r *http.Request, k *key.Key, requestID, model string, stream bool, status, errCode string, start time.Time, tin, tout, total int) {
 	log := &RequestLog{
-		RequestID:  requestID,
-		KeyID:      k.ID,
-		Model:      model,
-		Status:     status,
-		ErrorCode:  errCode,
-		QueuedAt:   start,
-		FinishedAt: time.Now(),
-		TokensIn:   tin,
-		TokensOut:  tout,
-		Stream:     stream,
-		ClientUA:   truncateUA(r.UserAgent()),
-		ClientIP:   clientIP(r),
+		RequestID:   requestID,
+		KeyID:       k.ID,
+		Model:       model,
+		Status:      status,
+		ErrorCode:   errCode,
+		QueuedAt:    start,
+		FinishedAt:  time.Now(),
+		TokensIn:    tin,
+		TokensOut:   tout,
+		Stream:      stream,
+		ClientUA:    truncateUA(r.UserAgent()),
+		ClientIP:    clientIP(r),
+		InboundPath: r.URL.Path,
 	}
 	s.pushRecent(log)
 	s.persist(log)
@@ -1164,27 +1329,30 @@ func (s *Server) recordResult(r *http.Request, k *key.Key, requestID, model stri
 		providerName = res.Err.Provider
 	}
 	log := &RequestLog{
-		RequestID:         requestID,
-		KeyID:             k.ID,
-		Model:             model,
-		Provider:          providerName,
-		Status:            status,
-		ErrorCode:         errCode,
-		QueuedAt:          res.EnqueuedAt,
-		StartedAt:         res.DequeuedAt,
-		FinishedAt:        time.Now(),
-		QueueWaitMs:       res.QueueWait().Milliseconds(),
-		Attempts:          res.Attempt,
-		TokensIn:          res.Usage.Prompt,
-		TokensOut:         res.Usage.Completion,
-		Stream:            stream,
-		ClientUA:          truncateUA(r.UserAgent()),
-		ClientIP:          clientIP(r),
-		FirstTokenMs:      res.FirstTokenMs,
-		ResponseModel:     res.ResponseModel,
-		UpstreamRequestID: res.UpstreamRequestID,
-		CachedTokens:      res.CachedTokens,
-		CachedWriteTokens: res.CachedWriteTokens,
+		RequestID:           requestID,
+		KeyID:               k.ID,
+		Model:               model,
+		Provider:            providerName,
+		Status:              status,
+		ErrorCode:           errCode,
+		QueuedAt:            res.EnqueuedAt,
+		StartedAt:           res.DequeuedAt,
+		FinishedAt:          time.Now(),
+		QueueWaitMs:         res.QueueWait().Milliseconds(),
+		Attempts:            res.Attempt,
+		TokensIn:            res.Usage.Prompt,
+		TokensOut:           res.Usage.Completion,
+		Stream:              stream,
+		ClientUA:            truncateUA(r.UserAgent()),
+		ClientIP:            clientIP(r),
+		FirstTokenMs:        res.FirstTokenMs,
+		ResponseModel:       res.ResponseModel,
+		UpstreamRequestID:   res.UpstreamRequestID,
+		CachedTokens:        res.CachedTokens,
+		CachedWriteTokens:   res.CachedWriteTokens,
+		InboundPath:         r.URL.Path,
+		UpstreamHeaderMs:    res.UpstreamHeaderMs,
+		UpstreamContentType: res.UpstreamContentType,
 	}
 	if providerName != "" {
 		log.UpstreamModel = s.mgr.UpstreamModel(model, providerName)
@@ -1208,32 +1376,35 @@ func (s *Server) persist(log *RequestLog) {
 		return
 	}
 	rec := &db.Request{
-		RequestID:         log.RequestID,
-		KeyID:             log.KeyID,
-		Model:             log.Model,
-		Provider:          log.Provider,
-		Status:            log.Status,
-		ErrorCode:         log.ErrorCode,
-		UpstreamCode:      log.UpstreamCode,
-		UpstreamType:      log.UpstreamType,
-		UpstreamHTTP:      log.UpstreamHTTP,
-		ErrorDetail:       log.ErrorDetail,
-		QueuedAt:          log.QueuedAt,
-		StartedAt:         log.StartedAt,
-		FinishedAt:        log.FinishedAt,
-		QueueWaitMs:       log.QueueWaitMs,
-		Attempts:          log.Attempts,
-		TokensIn:          log.TokensIn,
-		TokensOut:         log.TokensOut,
-		ClientUA:          log.ClientUA,
-		ClientIP:          log.ClientIP,
-		UpstreamModel:     log.UpstreamModel,
-		FirstTokenMs:      log.FirstTokenMs,
-		ResponseModel:     log.ResponseModel,
-		UpstreamRequestID: log.UpstreamRequestID,
-		CachedTokens:      log.CachedTokens,
-		CachedWriteTokens: log.CachedWriteTokens,
-		Stream:            log.Stream,
+		RequestID:           log.RequestID,
+		KeyID:               log.KeyID,
+		Model:               log.Model,
+		Provider:            log.Provider,
+		Status:              log.Status,
+		ErrorCode:           log.ErrorCode,
+		UpstreamCode:        log.UpstreamCode,
+		UpstreamType:        log.UpstreamType,
+		UpstreamHTTP:        log.UpstreamHTTP,
+		ErrorDetail:         log.ErrorDetail,
+		QueuedAt:            log.QueuedAt,
+		StartedAt:           log.StartedAt,
+		FinishedAt:          log.FinishedAt,
+		QueueWaitMs:         log.QueueWaitMs,
+		Attempts:            log.Attempts,
+		TokensIn:            log.TokensIn,
+		TokensOut:           log.TokensOut,
+		ClientUA:            log.ClientUA,
+		ClientIP:            log.ClientIP,
+		UpstreamModel:       log.UpstreamModel,
+		FirstTokenMs:        log.FirstTokenMs,
+		ResponseModel:       log.ResponseModel,
+		UpstreamRequestID:   log.UpstreamRequestID,
+		CachedTokens:        log.CachedTokens,
+		CachedWriteTokens:   log.CachedWriteTokens,
+		Stream:              log.Stream,
+		InboundPath:         log.InboundPath,
+		UpstreamHeaderMs:    log.UpstreamHeaderMs,
+		UpstreamContentType: log.UpstreamContentType,
 	}
 	go func() {
 		if err := s.store.RecordRequest(rec); err != nil {

@@ -37,6 +37,11 @@ func (r *statusRecorder) Flush() {
 	}
 }
 
+// Unwrap 让 http.ResponseController 能穿透到真实 ResponseWriter。
+func (r *statusRecorder) Unwrap() http.ResponseWriter {
+	return r.ResponseWriter
+}
+
 // recoverMiddleware panic → 统一 500 internal_error（收敛格式）。
 func (s *Server) recoverMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

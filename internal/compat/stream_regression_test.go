@@ -297,8 +297,6 @@ func TestStreamRegressionFailuresAreSanitized(t *testing.T) {
 		{"error_payload", []regressionReadStep{{data: text + regressionFrame(`{"error":{"message":"`+secret+`","type":"invalid_api_key"}}`) + regressionFrame(`[DONE]`)}}, nil},
 		{"error_event", []regressionReadStep{{data: "event: error\ndata: {\"message\":\"" + secret + "\"}\n\n" + regressionFrame(`[DONE]`)}}, nil},
 		{"error_after_finish", []regressionReadStep{{data: text + finish}, {data: regressionFrame(`{"error":"` + secret + `"}`)}}, nil},
-		{"invalid_json", []regressionReadStep{{data: regressionFrame(secret) + regressionFrame(`[DONE]`)}}, nil},
-		{"truncated_json", []regressionReadStep{{data: text + finish + "data: {\"choices\":"}}, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			raw, err := io.ReadAll(wrapChatStream(KindResponses, &regressionStreamSource{steps: tc.steps}))
@@ -321,6 +319,26 @@ func TestStreamRegressionFailuresAreSanitized(t *testing.T) {
 			}
 			regressionSequence(t, events)
 		})
+	}
+}
+
+func TestStreamRegressionToleratesMalformedFrames(t *testing.T) {
+	// 单条非预期控制载荷只跳过，不熔断整条流：后续正常帧仍必须送达。
+	data := ": heartbeat\n\n" +
+		regressionFrame(`not-json`) +
+		regressionFrame(`":{"broken":`) +
+		regressionFrame(`{"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}`) +
+		regressionFrame(`[DONE]`)
+	raw, err := io.ReadAll(wrapChatStream(KindResponses, &regressionStreamSource{steps: regressionFragments(data, 7)}))
+	if err != nil {
+		t.Fatalf("malformed frame must not fail the stream: %v", err)
+	}
+	text := string(raw)
+	if strings.Contains(text, "response.failed") || !strings.Contains(text, "response.completed") {
+		t.Fatalf("stream did not recover: %s", text)
+	}
+	if !strings.Contains(text, `"delta":"ok"`) {
+		t.Fatalf("valid frame after malformed frame was lost: %s", text)
 	}
 }
 

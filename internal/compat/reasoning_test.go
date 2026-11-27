@@ -1,4 +1,4 @@
-// 思考字段兼容层回归测试：reasoning 必须同步为 reasoning_content，其它字节不动。
+// 思考字段兼容层回归测试：非流式补字段，流式必须原样透传。
 package compat
 
 import (
@@ -24,7 +24,7 @@ func TestAliasReasoningBodyKeepsNumbersAndAddsContent(t *testing.T) {
 	}
 }
 
-// TestAliasReasoningBodyIdempotent 已经在 reasoning_content 时不再重复添加。
+// TestAliasReasoningBodyWithoutReasoningIsUntouched 没有思考字段时字节不变。
 func TestAliasReasoningBodyWithoutReasoningIsUntouched(t *testing.T) {
 	body := []byte(`{"choices":[{"index":0,"delta":{"content":"hi"}}]}`)
 	if got := AliasReasoningBody(body); !bytes.Equal(got, body) {
@@ -36,49 +36,60 @@ func TestAliasReasoningBodyWithoutReasoningIsUntouched(t *testing.T) {
 	}
 }
 
-// TestAliasReasoningStreamEmitsPerEvent 验证逐事件立即输出，且保留心跳、[DONE] 与用量接口。
-func TestAliasReasoningStreamEmitsPerEvent(t *testing.T) {
-	source := strings.Join([]string{
-		": keepalive\n\n",
-		`data: {"id":"c1","created":1789043399,"choices":[{"index":0,"delta":{"role":"assistant","reasoning":"第一步"}}]}` + "\n\n",
-		`data: {"choices":[{"index":0,"delta":{"content":"正文"}}]}` + "\n\n",
-		`data: {"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}` + "\n\n",
-		"data: [DONE]\n\n",
-	}, "")
-	usage := &usageSource{src: strings.NewReader(source), usage: provider.Usage{PromptTokens: 3, CompletionTokens: 4, TotalTokens: 7}, known: true}
-	stream := AliasReasoningStream(usage)
-	defer stream.Close()
+// memoryStream 是最小流式响应体，用来确认 ApplyResponse 的包装行为。
+type memoryStream struct{ src *strings.Reader }
 
-	got, err := io.ReadAll(stream)
+func (m *memoryStream) Read(p []byte) (int, error) { return m.src.Read(p) }
+func (m *memoryStream) Close() error               { return nil }
+
+// TestApplyResponseNormalizesStreamReasoning 流式同协议只做思考字段标准化：
+// reasoning → reasoning_content，删除冗余 reasoning，并保留 "content": null。
+func TestApplyResponseNormalizesStreamReasoning(t *testing.T) {
+	raw := `data: {"choices":[{"index":0,"delta":{"role":"assistant","reasoning":"第一步"}}]}` + "\n\n" +
+		"data: [DONE]\n\n"
+	resp := &provider.Response{Stream: true, StreamBody: &memoryStream{src: strings.NewReader(raw)}}
+	if err := ApplyResponse(KindNone, resp); err != nil {
+		t.Fatalf("apply response: %v", err)
+	}
+	out, err := io.ReadAll(resp.StreamBody)
 	if err != nil {
 		t.Fatalf("read stream: %v", err)
 	}
-	text := string(got)
-	for _, want := range []string{": keepalive", `"reasoning":"第一步"`, `"reasoning_content":"第一步"`, `"content":"正文"`, "data: [DONE]", `"usage"`, `"created":1789043399`} {
-		if !strings.Contains(text, want) {
-			t.Fatalf("missing %s in %s", want, text)
-		}
+	text := string(out)
+	if strings.Contains(text, `"reasoning":`) {
+		t.Fatalf("redundant reasoning field must be removed: %s", text)
 	}
-	if strings.Contains(text, `"content":"正文","reasoning_content"`) {
-		t.Fatalf("content-only delta must not gain reasoning_content: %s", text)
+	if !strings.Contains(text, `"reasoning_content":"第一步"`) {
+		t.Fatalf("missing reasoning_content: %s", text)
 	}
-	if u, known := stream.(provider.UsageReader).StreamUsage(); !known || u.TotalTokens != 7 {
-		t.Fatalf("usage not forwarded: %+v known=%v", u, known)
+	if !strings.Contains(text, `"content":null`) {
+		t.Fatalf("thinking delta must keep content:null: %s", text)
 	}
-	if strings.HasPrefix(text, "data: data:") {
-		t.Fatalf("data prefix duplicated: %s", text)
+	if !strings.Contains(text, "data: [DONE]") {
+		t.Fatalf("terminal frame lost: %s", text)
 	}
 }
 
-// usageSource 模拟 provider 的流式响应体（带用量旁路）。
-type usageSource struct {
-	src   io.Reader
-	usage provider.Usage
-	known bool
-}
-
-func (s *usageSource) Read(p []byte) (int, error) { return s.src.Read(p) }
-func (s *usageSource) Close() error               { return nil }
-func (s *usageSource) StreamUsage() (provider.Usage, bool) {
-	return s.usage, s.known
+// TestApplyResponseStreamReframesOrdinaryLines 无思考字段时内容不变，
+// 但每个完整行都补齐事件边界（对齐 agent2api：不依赖上游空行）。
+func TestApplyResponseStreamReframesOrdinaryLines(t *testing.T) {
+	raw := "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n" +
+		": comment\n\n" +
+		"data: not-json\n\n" +
+		"data: [DONE]\n\n"
+	want := "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n" +
+		": comment\n\n" +
+		"data: not-json\n\n" +
+		"data: [DONE]\n\n"
+	resp := &provider.Response{Stream: true, StreamBody: &memoryStream{src: strings.NewReader(raw)}}
+	if err := ApplyResponse(KindNone, resp); err != nil {
+		t.Fatalf("apply response: %v", err)
+	}
+	out, err := io.ReadAll(resp.StreamBody)
+	if err != nil {
+		t.Fatalf("read stream: %v", err)
+	}
+	if string(out) != want {
+		t.Fatalf("ordinary frames not reframed:\n want %q\n got  %q", want, string(out))
+	}
 }

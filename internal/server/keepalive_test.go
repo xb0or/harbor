@@ -63,9 +63,13 @@ func (s *slowReader) Read(p []byte) (int, error) {
 	}
 }
 
+func (s *slowReader) Close() error { return nil }
+
 func TestCopyStreamEmitsKeepaliveWhenIdle(t *testing.T) {
+	on := true
 	s := &Server{}
 	s.SetKeepalive(config.KeepaliveConfig{
+		Enabled:  &on,
 		Interval: "40ms",
 		Style:    "comment",
 		Comment:  "keepalive",
@@ -73,7 +77,7 @@ func TestCopyStreamEmitsKeepaliveWhenIdle(t *testing.T) {
 	w := newFlushRecorder()
 	src := &slowReader{gap: 200 * time.Millisecond, first: "data: one\n\n", last: "data: two\n\n"}
 
-	if err := s.copyStream(context.Background(), w, src, w, nil); err != nil {
+	if err := s.copyStream(context.Background(), w, src, http.NewResponseController(w), nil); err != nil {
 		t.Fatalf("copyStream: %v", err)
 	}
 	out := w.String()
@@ -94,7 +98,7 @@ func TestCopyStreamKeepaliveDisabled(t *testing.T) {
 	s.SetKeepalive(config.KeepaliveConfig{Enabled: &off, Interval: "20ms"})
 	w := newFlushRecorder()
 	src := &slowReader{gap: 120 * time.Millisecond, first: "data: one\n\n", last: "data: two\n\n"}
-	if err := s.copyStream(context.Background(), w, src, w, nil); err != nil {
+	if err := s.copyStream(context.Background(), w, src, http.NewResponseController(w), nil); err != nil {
 		t.Fatalf("copyStream: %v", err)
 	}
 	if strings.Contains(w.String(), "keepalive") {
@@ -112,8 +116,8 @@ func TestKeepaliveFrameVariants(t *testing.T) {
 		t.Fatalf("event frame = %q", got)
 	}
 	def := config.KeepaliveConfig{}
-	if !def.IsEnabled() || def.IntervalDuration() != 15*time.Second {
-		t.Fatalf("defaults: enabled=%v interval=%s", def.IsEnabled(), def.IntervalDuration())
+	if def.IsEnabled() || def.IntervalDuration() != 15*time.Second {
+		t.Fatalf("defaults must be disabled with 15s interval: enabled=%v interval=%s", def.IsEnabled(), def.IntervalDuration())
 	}
 	if def.Frame() != ": keepalive\n\n" {
 		t.Fatalf("default frame = %q", def.Frame())
@@ -123,8 +127,10 @@ func TestKeepaliveFrameVariants(t *testing.T) {
 // 心跳只能落在完整事件之后：上游把一条 data 拆成两段时，
 // 中途插入注释会把 JSON 截断（历史上真实的流式失效原因）。
 func TestCopyStreamKeepaliveWaitsForEventBoundary(t *testing.T) {
+	on := true
 	s := &Server{}
 	s.SetKeepalive(config.KeepaliveConfig{
+		Enabled:  &on,
 		Interval: "30ms",
 		Style:    "comment",
 		Comment:  "keepalive",
@@ -132,7 +138,7 @@ func TestCopyStreamKeepaliveWaitsForEventBoundary(t *testing.T) {
 	w := newFlushRecorder()
 	src := &slowReader{gap: 120 * time.Millisecond, first: "data: {\"content\":\"he", last: "llo\"}\n\n"}
 
-	if err := s.copyStream(context.Background(), w, src, w, nil); err != nil {
+	if err := s.copyStream(context.Background(), w, src, http.NewResponseController(w), nil); err != nil {
 		t.Fatalf("copyStream: %v", err)
 	}
 	out := w.String()

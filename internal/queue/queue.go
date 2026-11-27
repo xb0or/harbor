@@ -36,18 +36,20 @@ type Result struct {
 	Stream io.ReadCloser // 流式响应体（服务端负责 Close）
 	Usage  Usage
 	// UsageKnown 为 true 时 Token 字段来自上游可信 usage；false 时结算保留预扣量。
-	UsageKnown        bool
-	Err               *normalize.Error
-	Attempt           int
-	Provider          string        // 实际命中的上游 Provider（透传 executor.Result）
-	RequeueAt         time.Time     // 仅无响应的可恢复失败使用；不投递中间结果
-	FirstTokenMs      int64         // 从请求开始到首帧写出的毫秒数（流式）
-	UpstreamRequestID string        // 上游返回的 x-request-id
-	ResponseModel     string        // 上游响应体回显的模型名
-	CachedTokens      int           // 命中缓存的输入 token
-	CachedWriteTokens int           // 写入缓存的 token
-	Wait              time.Duration // 累计排队时间，不含执行时间
-	Queued            bool          // 是否真正等待过（包含重排）
+	UsageKnown          bool
+	Err                 *normalize.Error
+	Attempt             int
+	Provider            string        // 实际命中的上游 Provider（透传 executor.Result）
+	RequeueAt           time.Time     // 仅无响应的可恢复失败使用；不投递中间结果
+	FirstTokenMs        int64         // 从请求开始到首帧写出的毫秒数（流式）
+	UpstreamRequestID   string        // 上游返回的 x-request-id
+	ResponseModel       string        // 上游响应体回显的模型名
+	CachedTokens        int           // 命中缓存的输入 token
+	CachedWriteTokens   int           // 写入缓存的 token
+	UpstreamHeaderMs    int64         // 发出上游请求到收到响应头的耗时（毫秒）
+	UpstreamContentType string        // 上游响应头 Content-Type
+	Wait                time.Duration // 累计排队时间，不含执行时间
+	Queued              bool          // 是否真正等待过（包含重排）
 	// 排队统计
 	EnqueuedAt time.Time
 	DequeuedAt time.Time

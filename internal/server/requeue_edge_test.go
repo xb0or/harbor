@@ -28,7 +28,7 @@ func TestRequeueRetryAfterAndResponsesHeartbeat(t *testing.T) {
 	cfg := testConfig()
 	cfg.Limits.ProviderCooldown = "20ms"
 	cfg.Limits.BackoffBase = "5ms"
-	cfg.Queue.Keepalive = "20ms"
+	cfg.Keepalive.Interval = "20ms"
 	h, _, _ := buildTestServer(t, cfg, ups)
 	ts := httptest.NewServer(h)
 	defer ts.Close()
@@ -178,7 +178,7 @@ func TestRequeueClientDisconnectDuringCooldown(t *testing.T) {
 	cfg := testConfig()
 	cfg.Limits.ProviderCooldown = "20ms"
 	cfg.Limits.BackoffBase = "5ms"
-	cfg.Queue.Keepalive = "10ms"
+	cfg.Keepalive.Interval = "10ms"
 	h, sched, _ := buildTestServer(t, cfg, ups)
 	ts := httptest.NewServer(h)
 	defer ts.Close()

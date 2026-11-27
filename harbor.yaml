@@ -18,7 +18,7 @@ server:
 queue:
   max_wait: 120s
   max_depth: 200
-  keepalive: 15s
+  keepalive: 15s        # 旧字段：仅当 keepalive.enabled=true 且未配置 keepalive.interval 时生效
   expose_queue_position: true
   # 排队超过 30 秒仍未调度就提前返回 429（避免客户端干等到自己的超时）。
   early_429_after: 30s
@@ -26,13 +26,18 @@ queue:
 limits:
   max_provider_attempts: 3
   request_timeout: 120s
+  # 流式请求不套整段 request_timeout：只限制上游首包（TTFB）与流转发空闲。
+  stream_ttfb_timeout: 60s
+  stream_idle_timeout: 120s
   backoff_base: 500ms
   provider_cooldown: 30s
 
 # 长连接心跳保活（SSE / 流式响应）：静默过久时主动补空事件，避免被中间设备掐断。
 # 管理台「设置」页可热更新；配了 storage 时落库，重启保留。
+# 关闭：部分客户端的 SSE 解析器在首帧收到 ": keepalive" 注释帧会出现兼容异常，
+# 关闭后流式响应退化为原样直通（首帧直接是 data: ...）。
 keepalive:
-  enabled: true
+  enabled: false
   interval: 15s
   style: comment
   comment: keepalive

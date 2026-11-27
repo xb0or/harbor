@@ -80,10 +80,12 @@ func ApplyResponse(kind Kind, resp *provider.Response) error {
 		return nil
 	}
 	if kind == KindNone {
-		// 原生 chat/completions：只补思考字段兼容，其余字节原样透传。
+		// 原生 chat/completions：同协议直通优先。
+		// 流式只做「单次按行拆帧」的思考字段标准化，其余事件字节原样透传；
+		// 非流式才整体补齐思考字段（重新序列化会改变 delta 字段集合）。
 		if resp.Stream {
 			if resp.StreamBody != nil {
-				resp.StreamBody = AliasReasoningStream(resp.StreamBody)
+				resp.StreamBody = wrapReasoningStream(resp.StreamBody)
 			}
 			return nil
 		}

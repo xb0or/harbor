@@ -31,7 +31,8 @@ type Config struct {
 // 当连接上长时间没有数据流动时，网关主动向下游写一个空事件，
 // 避免中间代理或客户端空闲超时把长连接掐断。
 type KeepaliveConfig struct {
-	// Enabled 总开关，默认 true（nil = 默认开启）。
+	// Enabled 总开关，默认 false：只有显式开启才会在空闲时补心跳，
+	// 避免首帧就插入 `: keepalive` 注释帧影响严格 SSE 客户端。
 	Enabled *bool `yaml:"enabled"`
 	// Interval 空闲多久发一次心跳，默认 15s。
 	Interval string `yaml:"interval"`
@@ -42,8 +43,8 @@ type KeepaliveConfig struct {
 	Comment string `yaml:"comment"`
 }
 
-// IsEnabled 返回心跳是否开启（nil 视为开启）。
-func (k KeepaliveConfig) IsEnabled() bool { return k.Enabled == nil || *k.Enabled }
+// IsEnabled 返回心跳是否开启（必须显式 enabled: true）。
+func (k KeepaliveConfig) IsEnabled() bool { return k.Enabled != nil && *k.Enabled }
 
 // IntervalDuration 返回空闲阈值。
 func (k KeepaliveConfig) IntervalDuration() time.Duration {
@@ -155,8 +156,13 @@ type KeyConfig struct {
 type RetryLimitsConfig struct {
 	MaxProviderAttempts int    `yaml:"max_provider_attempts"`
 	RequestTimeout      string `yaml:"request_timeout"`
-	BackoffBase         string `yaml:"backoff_base"`
-	ProviderCooldown    string `yaml:"provider_cooldown"`
+	// StreamTTFBTimeout 流式请求等待上游响应头（TTFB）的上限，默认 60s。
+	// 首包之后不再套固定总超时，改为按 stream_idle_timeout 判定空闲。
+	StreamTTFBTimeout string `yaml:"stream_ttfb_timeout"`
+	// StreamIdleTimeout 流转发期间两次上游数据之间的空闲上限，默认 120s；0 = 关闭。
+	StreamIdleTimeout string `yaml:"stream_idle_timeout"`
+	BackoffBase       string `yaml:"backoff_base"`
+	ProviderCooldown  string `yaml:"provider_cooldown"`
 }
 
 type AdminConfig struct {
@@ -191,6 +197,12 @@ func (c *ServerConfig) MaxBodyBytesInFlightBytes() int64 {
 }
 func (c *RetryLimitsConfig) RequestTimeoutDuration() time.Duration {
 	return parseDur(c.RequestTimeout, 120*time.Second)
+}
+func (c *RetryLimitsConfig) StreamTTFBTimeoutDuration() time.Duration {
+	return parseDur(c.StreamTTFBTimeout, 60*time.Second)
+}
+func (c *RetryLimitsConfig) StreamIdleTimeoutDuration() time.Duration {
+	return parseDur(c.StreamIdleTimeout, 120*time.Second)
 }
 func (c *RetryLimitsConfig) BackoffBaseDuration() time.Duration {
 	return parseDur(c.BackoffBase, 500*time.Millisecond)
@@ -381,6 +393,8 @@ func (c *Config) validateBounds() error {
 		{"queue.early_429_after", c.Queue.Early429After, true},
 		{"queue.keepalive", c.Queue.Keepalive, false},
 		{"limits.request_timeout", c.Limits.RequestTimeout, false},
+		{"limits.stream_ttfb_timeout", c.Limits.StreamTTFBTimeout, false},
+		{"limits.stream_idle_timeout", c.Limits.StreamIdleTimeout, true},
 		{"limits.backoff_base", c.Limits.BackoffBase, true},
 		{"limits.provider_cooldown", c.Limits.ProviderCooldown, true},
 		{"keepalive.interval", c.Keepalive.Interval, false},
