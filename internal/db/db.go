@@ -107,7 +107,8 @@ func (d *DB) Migrate() error {
 			cache_write_tokens INTEGER NOT NULL DEFAULT 0,
 			inbound_path TEXT,
 			upstream_header_ms INTEGER NOT NULL DEFAULT 0,
-			upstream_content_type TEXT
+			upstream_content_type TEXT,
+			thinking_level TEXT
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_requests_finished ON requests(finished_at DESC)`,
 		`CREATE TABLE IF NOT EXISTS provider_credentials (
@@ -189,6 +190,9 @@ func (d *DB) Migrate() error {
 	}
 	if err := d.migrateRequestsStreamMeta(); err != nil {
 		return fmt.Errorf("migrate requests stream meta: %w", err)
+	}
+	if err := d.migrateRequestsThinking(); err != nil {
+		return fmt.Errorf("migrate requests thinking: %w", err)
 	}
 	return nil
 }
@@ -647,6 +651,21 @@ func (d *DB) migrateRequestsStreamMeta() error {
 	return nil
 }
 
+// migrateRequestsThinking 补齐思考等级列（旧库自动迁移）。
+func (d *DB) migrateRequestsThinking() error {
+	columns, err := tableColumns(d.sql, "requests")
+	if err != nil {
+		return err
+	}
+	if columns["thinking_level"] {
+		return nil
+	}
+	if _, err := d.sql.Exec(`ALTER TABLE requests ADD COLUMN thinking_level TEXT`); err != nil {
+		return fmt.Errorf("migrate requests thinking_level: %w", err)
+	}
+	return nil
+}
+
 // --- requests ---
 
 // Request 是单请求审计记录（对应 requests 表）。
@@ -683,6 +702,7 @@ type Request struct {
 	InboundPath         string `json:"inbound_path,omitempty"`
 	UpstreamHeaderMs    int64  `json:"upstream_header_ms,omitempty"`
 	UpstreamContentType string `json:"upstream_content_type,omitempty"`
+	ThinkingLevel       string `json:"thinking_level,omitempty"`
 }
 
 // RecordRequest 写入一条请求记录（按 request_id 幂等覆盖）。
@@ -696,8 +716,8 @@ func (d *DB) RecordRequest(r *Request) error {
 			queued_at, started_at, finished_at, queue_wait_ms, attempts,
 			tokens_in, tokens_out, client_ua, client_ip, upstream_model, first_token_ms,
 			response_model, upstream_request_id, cached_tokens, cache_write_tokens, stream,
-			inbound_path, upstream_header_ms, upstream_content_type)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			inbound_path, upstream_header_ms, upstream_content_type, thinking_level)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(request_id) DO UPDATE SET
 			status=excluded.status, error_code=excluded.error_code,
 			upstream_code=excluded.upstream_code, upstream_type=excluded.upstream_type,
@@ -712,6 +732,7 @@ func (d *DB) RecordRequest(r *Request) error {
 			stream=excluded.stream, inbound_path=excluded.inbound_path,
 			upstream_header_ms=excluded.upstream_header_ms,
 			upstream_content_type=excluded.upstream_content_type,
+			thinking_level=excluded.thinking_level,
 			provider=excluded.provider`,
 		r.RequestID, r.KeyID, r.Model, nullStr(r.Provider), r.Status, nullStr(r.ErrorCode),
 		nullStr(r.UpstreamCode), nullStr(r.UpstreamType), r.UpstreamHTTP, nullStr(r.ErrorDetail),
@@ -719,7 +740,7 @@ func (d *DB) RecordRequest(r *Request) error {
 		r.QueueWaitMs, r.Attempts, r.TokensIn, r.TokensOut,
 		nullStr(r.ClientUA), nullStr(r.ClientIP), nullStr(r.UpstreamModel), r.FirstTokenMs,
 		nullStr(r.ResponseModel), nullStr(r.UpstreamRequestID), r.CachedTokens, r.CachedWriteTokens, boolInt(r.Stream),
-		nullStr(r.InboundPath), r.UpstreamHeaderMs, nullStr(r.UpstreamContentType),
+		nullStr(r.InboundPath), r.UpstreamHeaderMs, nullStr(r.UpstreamContentType), nullStr(r.ThinkingLevel),
 	)
 	if err != nil {
 		return fmt.Errorf("record request: %w", err)
@@ -735,7 +756,7 @@ func (d *DB) GetRequest(id string) (*Request, error) {
 			queued_at, started_at, finished_at, queue_wait_ms, attempts,
 			tokens_in, tokens_out, client_ua, client_ip, upstream_model, first_token_ms,
 			response_model, upstream_request_id, cached_tokens, cache_write_tokens, stream,
-			inbound_path, upstream_header_ms, upstream_content_type
+			inbound_path, upstream_header_ms, upstream_content_type, thinking_level
 		FROM requests WHERE request_id = ?`, id)
 	return scanRequest(row)
 }
@@ -776,7 +797,7 @@ func (d *DB) ListRequests(f RequestFilter) ([]*Request, int, error) {
 	q := strings.TrimSpace(f.Q)
 	status := strings.TrimSpace(f.Status)
 	switch status {
-	case "success", "error", "timeout", "cancelled":
+	case "success", "error", "timeout", "cancelled", "queued", "connecting", "waiting", "responding":
 	default:
 		status = ""
 	}
@@ -831,7 +852,7 @@ func (d *DB) ListRequests(f RequestFilter) ([]*Request, int, error) {
 			queued_at, started_at, finished_at, queue_wait_ms, attempts,
 			tokens_in, tokens_out, client_ua, client_ip, upstream_model, first_token_ms,
 			response_model, upstream_request_id, cached_tokens, cache_write_tokens, stream,
-			inbound_path, upstream_header_ms, upstream_content_type
+			inbound_path, upstream_header_ms, upstream_content_type, thinking_level
 		FROM requests WHERE `+clause+` ORDER BY finished_at DESC LIMIT ? OFFSET ?`, queryArgs...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("list requests: %w", err)
@@ -886,13 +907,14 @@ func scanRequest(r rowScanner) (*Request, error) {
 		inboundPath   sql.NullString
 		upHeaderMs    int64
 		upContentType sql.NullString
+		thinkingLevel sql.NullString
 	)
 	err := r.Scan(&x.RequestID, &x.KeyID, &x.Model, &provider, &x.Status, &errorCode,
 		&upCode, &upType, &upHTTP, &detail,
 		&x.QueuedAt, &startedAt, &finishedAt, &queueWait, &attempts,
 		&tokensIn, &tokensOut, &clientUA, &clientIP, &upModel, &firstMs,
 		&respModel, &upReqID, &cachedTok, &cacheWriteTok, &streamFlag,
-		&inboundPath, &upHeaderMs, &upContentType)
+		&inboundPath, &upHeaderMs, &upContentType, &thinkingLevel)
 	if err != nil {
 		return nil, err
 	}
@@ -920,6 +942,7 @@ func scanRequest(r rowScanner) (*Request, error) {
 	x.InboundPath = inboundPath.String
 	x.UpstreamHeaderMs = upHeaderMs
 	x.UpstreamContentType = upContentType.String
+	x.ThinkingLevel = thinkingLevel.String
 	return &x, nil
 }
 

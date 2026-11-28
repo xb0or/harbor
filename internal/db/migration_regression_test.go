@@ -124,7 +124,7 @@ func TestMigrateRequestsProviderColumn(t *testing.T) {
 	if !columns["provider"] {
 		t.Fatal("requests.provider column missing after migration")
 	}
-	for _, name := range []string{"inbound_path", "upstream_header_ms", "upstream_content_type"} {
+	for _, name := range []string{"inbound_path", "upstream_header_ms", "upstream_content_type", "thinking_level"} {
 		if !columns[name] {
 			t.Fatalf("requests.%s column missing after migration", name)
 		}
@@ -137,7 +137,7 @@ func TestMigrateRequestsProviderColumn(t *testing.T) {
 	if rec.Model != "m1" || rec.Status != "success" {
 		t.Fatalf("legacy request row corrupted: %+v", rec)
 	}
-	if rec.InboundPath != "" || rec.UpstreamHeaderMs != 0 || rec.UpstreamContentType != "" {
+	if rec.InboundPath != "" || rec.UpstreamHeaderMs != 0 || rec.UpstreamContentType != "" || rec.ThinkingLevel != "" {
 		t.Fatalf("legacy row new columns should default empty: %+v", rec)
 	}
 }

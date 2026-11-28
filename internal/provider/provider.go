@@ -14,6 +14,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/http/httptrace"
 	"sort"
 	"strconv"
 	"strings"
@@ -988,6 +989,9 @@ type Request struct {
 	// TTFBTimeout 仅流式生效：等待上游响应头的上限（0 = 使用 provider 默认超时）。
 	// 收到响应头后立即解除，不再限制整条流的生命周期。
 	TTFBTimeout time.Duration
+	// PhaseHook 接收请求阶段变化：waiting（请求已写出）/ responding（收到首字节）。
+	// nil 时零开销，不影响转发字节。
+	PhaseHook func(phase string)
 }
 
 // parseRetryAfter 解析 delta-seconds / HTTP-date；无效、过期或超出 Duration 范围则忽略。
@@ -1011,6 +1015,18 @@ func (p *Provider) Execute(ctx context.Context, req *Request) (*Response, error)
 	cred, ok := p.pick()
 	if !ok {
 		return nil, normalize.Upstream(p.Name, 503, "no available credential")
+	}
+
+	var waitingOnce, respondingOnce sync.Once
+	if req.PhaseHook != nil {
+		ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+			WroteRequest: func(httptrace.WroteRequestInfo) {
+				waitingOnce.Do(func() { req.PhaseHook("waiting") })
+			},
+			GotFirstResponseByte: func() {
+				respondingOnce.Do(func() { req.PhaseHook("responding") })
+			},
+		})
 	}
 
 	snapshot := p.Snapshot()
@@ -1115,6 +1131,9 @@ func (p *Provider) Execute(ctx context.Context, req *Request) (*Response, error)
 		return nil, he
 	}
 
+	if req.PhaseHook != nil {
+		respondingOnce.Do(func() { req.PhaseHook("responding") })
+	}
 	contentType := resp.Header.Get("Content-Type")
 	// 上游错误响应：读取 body 用于分类，然后标记凭证。
 	// 注意：不能 defer resp.Body.Close()——流式路径要把 body 所有权

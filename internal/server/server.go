@@ -89,7 +89,7 @@ type RequestLog struct {
 	KeyID     string `json:"key_id"`
 	Model     string `json:"model"`
 	Provider  string `json:"provider,omitempty"` // 实际命中的上游 Provider；校验类失败为空
-	Status    string `json:"status"`             // success | error | timeout | cancelled
+	Status    string `json:"status"`             // queued | connecting | waiting | responding | success | error | timeout | cancelled
 	ErrorCode string `json:"error_code,omitempty"`
 	// UpstreamCode/UpstreamType/UpstreamHTTP 上游原始错误信息（仅后台审计展示，绝不对外）。
 	UpstreamCode  string    `json:"upstream_code,omitempty"`
@@ -117,6 +117,8 @@ type RequestLog struct {
 	InboundPath         string `json:"inbound_path,omitempty"`          // 真实入站路径
 	UpstreamHeaderMs    int64  `json:"upstream_header_ms,omitempty"`    // 上游响应头耗时
 	UpstreamContentType string `json:"upstream_content_type,omitempty"` // 上游 Content-Type
+	// ThinkingLevel 是本次请求的思考等级（low / medium / high / max 等）。
+	ThinkingLevel string `json:"thinking_level,omitempty"`
 }
 
 // New 构造 Server。store 为 nil 时运行纯内存模式（P0 行为）。
@@ -174,8 +176,89 @@ func (s *Server) Handler() http.Handler {
 // --- OpenAI 兼容代理 ---
 
 type openAIReqMeta struct {
-	Model  string `json:"model"`
-	Stream bool   `json:"stream"`
+	Model           string          `json:"model"`
+	Stream          bool            `json:"stream"`
+	ReasoningEffort string          `json:"reasoning_effort"`
+	Reasoning       json.RawMessage `json:"reasoning"`
+	Thinking        json.RawMessage `json:"thinking"`
+}
+
+// normalizeThinkingLevel 只接受已知思考等级，避免把任意字符串写进审计。
+func normalizeThinkingLevel(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "minimal", "low", "medium", "high", "max", "none", "auto":
+		return strings.ToLower(strings.TrimSpace(v))
+	default:
+		return ""
+	}
+}
+
+// thinkingLevelFromModel 解析模型名尾部的思考等级，如 deepseek-v4.1-flash(max)。
+func thinkingLevelFromModel(model string) string {
+	runes := []rune(strings.TrimSpace(model))
+	if len(runes) < 3 {
+		return ""
+	}
+	last := runes[len(runes)-1]
+	var open rune
+	switch last {
+	case ')':
+		open = '('
+	case ']':
+		open = '['
+	case '）':
+		open = '（'
+	case '】':
+		open = '【'
+	default:
+		return ""
+	}
+	for i := len(runes) - 2; i >= 0; i-- {
+		if runes[i] == open {
+			return normalizeThinkingLevel(string(runes[i+1 : len(runes)-1]))
+		}
+	}
+	return ""
+}
+
+// thinkingLevelOf 从请求体提取思考等级：
+// chat 的 reasoning_effort、Responses 的 reasoning.effort、DeepSeek 的 thinking，
+// 最后回退到模型名后缀（max）约定。
+func thinkingLevelOf(meta openAIReqMeta, model string) string {
+	if level := normalizeThinkingLevel(meta.ReasoningEffort); level != "" {
+		return level
+	}
+	if len(meta.Reasoning) > 0 {
+		var r struct {
+			Effort string `json:"effort"`
+		}
+		if json.Unmarshal(meta.Reasoning, &r) == nil {
+			if level := normalizeThinkingLevel(r.Effort); level != "" {
+				return level
+			}
+		}
+	}
+	if len(meta.Thinking) > 0 {
+		var t struct {
+			Level string `json:"level"`
+			Type  string `json:"type"`
+		}
+		if json.Unmarshal(meta.Thinking, &t) == nil {
+			if level := normalizeThinkingLevel(t.Level); level != "" {
+				return level
+			}
+			if level := normalizeThinkingLevel(t.Type); level != "" {
+				return level
+			}
+		}
+		var plain string
+		if json.Unmarshal(meta.Thinking, &plain) == nil {
+			if level := normalizeThinkingLevel(plain); level != "" {
+				return level
+			}
+		}
+	}
+	return thinkingLevelFromModel(model)
 }
 
 func rejectDuplicateTopLevelFields(body []byte) error {
@@ -276,6 +359,7 @@ func (s *Server) handleOpenAI(inboundPath string) http.HandlerFunc {
 			s.writeError(w, requestID, normalize.New(normalize.ErrInvalidRequest, "model is required"))
 			return
 		}
+		thinkingLevel := thinkingLevelOf(meta, meta.Model)
 		// 兼容没写 body.stream 的客户端：Accept: text/event-stream 或 ?stream=true
 		// 也视为流式请求。否则网关会按普通 JSON 返回，客户端只能等整段生成完才看到内容。
 		if !meta.Stream {
@@ -336,6 +420,9 @@ func (s *Server) handleOpenAI(inboundPath string) http.HandlerFunc {
 			Body:        body,
 			Stream:      meta.Stream,
 			TTFBTimeout: time.Duration(s.streamTTFBNs.Load()),
+			PhaseHook: func(phase string) {
+				s.setLiveStatus(requestID, phase)
+			},
 		}
 
 		lease := s.newProviderLease(meta.Model)
@@ -343,6 +430,7 @@ func (s *Server) handleOpenAI(inboundPath string) http.HandlerFunc {
 			s.writeError(w, requestID, normalize.New(normalize.ErrModelForbidden, "model "+meta.Model+" has no route"))
 			return
 		}
+		s.beginLiveRequest(r, k, requestID, meta.Model, meta.Stream, start, thinkingLevel)
 
 		// 每次出队只执行一个 attempt；这个闭包跨重排保留已使用的预算。
 		attempts := 0
@@ -356,6 +444,10 @@ func (s *Server) handleOpenAI(inboundPath string) http.HandlerFunc {
 			TokenReserve:     estimatePromptTokens(body),
 			ReleaseResources: releaseBody,
 			Do: func(ctx context.Context) *queue.Result {
+				if p := lease.Provider(); p != nil {
+					s.setLiveProvider(requestID, p.Name, s.mgr.UpstreamModel(meta.Model, p.Name))
+				}
+				s.setLiveStatus(requestID, "connecting")
 				res := s.exec.RunWithLease(ctx, meta.Model, upReq, lease, attempts)
 				attempts += res.Attempts
 				out := &queue.Result{
@@ -430,6 +522,7 @@ func (s *Server) awaitResult(w http.ResponseWriter, r *http.Request, job *queue.
 		}
 		w.Header().Set("X-Harbor-Queue-Wait-Ms", strconv.FormatInt(res.QueueWait().Milliseconds(), 10))
 		w.Header().Set("Content-Type", "application/json")
+		s.setLiveStatus(requestID, "responding")
 		w.WriteHeader(res.Status)
 		_, _ = w.Write(res.Body)
 	case <-r.Context().Done():
@@ -555,6 +648,7 @@ func (s *Server) forwardStream(w http.ResponseWriter, r *http.Request, rc *http.
 		frames, stopEarly := compat.TerminalFrames(r.URL.Path)
 		streamErr = s.copyStream(r.Context(), w, res.Stream, rc, func() {
 			res.FirstTokenMs = time.Since(start).Milliseconds()
+			s.setLiveStatus(requestID, "responding")
 		}, terminalFrames{frames: frames, stopEarly: stopEarly})
 		s.applyStreamUsage(job, res)
 	} else {
@@ -1331,22 +1425,116 @@ func (s *Server) writeError(w http.ResponseWriter, requestID string, he *normali
 	normalize.Write(w, he, requestID)
 }
 
+// isLiveStatus 判断请求是否仍在进行中。
+func isLiveStatus(status string) bool {
+	switch status {
+	case "queued", "connecting", "waiting", "responding":
+		return true
+	default:
+		return false
+	}
+}
+
+// beginLiveRequest 在请求进入排队前创建一条进行中记录。
+// 最终成功/失败时 record/recordResult 会用同 ID 覆盖它。
+func (s *Server) beginLiveRequest(r *http.Request, k *key.Key, requestID, model string, stream bool, start time.Time, thinkingLevel string) {
+	keyID := ""
+	if k != nil {
+		keyID = k.ID
+	}
+	log := &RequestLog{
+		RequestID:     requestID,
+		KeyID:         keyID,
+		Model:         model,
+		Status:        "queued",
+		QueuedAt:      start,
+		Stream:        stream,
+		ClientUA:      truncateUA(r.UserAgent()),
+		ClientIP:      clientIP(r),
+		InboundPath:   r.URL.Path,
+		ThinkingLevel: thinkingLevel,
+	}
+	s.pushRecent(log)
+}
+
+// updateLive 对进行中的记录做原地更新；已结束的记录不再修改。
+func (s *Server) updateLive(requestID string, fn func(*RequestLog)) {
+	s.recentMu.Lock()
+	if log, ok := s.recent[requestID]; ok && isLiveStatus(log.Status) {
+		fn(log)
+	}
+	s.recentMu.Unlock()
+}
+
+// setLiveStatus 推进进行中请求的阶段。
+func (s *Server) setLiveStatus(requestID, status string) {
+	if !isLiveStatus(status) {
+		return
+	}
+	now := time.Now()
+	s.updateLive(requestID, func(log *RequestLog) {
+		if log.StartedAt.IsZero() && status != "queued" {
+			log.StartedAt = now
+		}
+		if status == "connecting" && log.Attempts == 0 {
+			log.Attempts = 1
+		}
+		if status == "responding" && log.FirstTokenMs == 0 {
+			log.FirstTokenMs = now.Sub(log.QueuedAt).Milliseconds()
+		}
+		log.Status = status
+	})
+}
+
+// setLiveProvider 在进行中记录上补实际命中的 Provider / 上游模型。
+func (s *Server) setLiveProvider(requestID, providerName, upstreamModel string) {
+	s.updateLive(requestID, func(log *RequestLog) {
+		if providerName != "" {
+			log.Provider = providerName
+		}
+		if upstreamModel != "" {
+			log.UpstreamModel = upstreamModel
+		}
+	})
+}
+
+// liveMeta 读取进行中记录的快照（用于最终记录继承 Provider/开始时间/思考等级）。
+func (s *Server) liveMeta(requestID string) RequestLog {
+	s.recentMu.Lock()
+	defer s.recentMu.Unlock()
+	if log, ok := s.recent[requestID]; ok {
+		return *log
+	}
+	return RequestLog{}
+}
+
+// liveThinkingLevel 读取进行中记录已解析出的思考等级，供最终记录继承。
+func (s *Server) liveThinkingLevel(requestID string) string {
+	return s.liveMeta(requestID).ThinkingLevel
+}
+
 // record 记录未产生 queue.Result 的请求（鉴权/校验失败等）。
 func (s *Server) record(r *http.Request, k *key.Key, requestID, model string, stream bool, status, errCode string, start time.Time, tin, tout, total int) {
+	live := s.liveMeta(requestID)
 	log := &RequestLog{
-		RequestID:   requestID,
-		KeyID:       k.ID,
-		Model:       model,
-		Status:      status,
-		ErrorCode:   errCode,
-		QueuedAt:    start,
-		FinishedAt:  time.Now(),
-		TokensIn:    tin,
-		TokensOut:   tout,
-		Stream:      stream,
-		ClientUA:    truncateUA(r.UserAgent()),
-		ClientIP:    clientIP(r),
-		InboundPath: r.URL.Path,
+		RequestID:     requestID,
+		KeyID:         k.ID,
+		Model:         model,
+		Provider:      live.Provider,
+		Status:        status,
+		ErrorCode:     errCode,
+		QueuedAt:      start,
+		StartedAt:     live.StartedAt,
+		FinishedAt:    time.Now(),
+		Attempts:      live.Attempts,
+		TokensIn:      tin,
+		TokensOut:     tout,
+		Stream:        stream,
+		ClientUA:      truncateUA(r.UserAgent()),
+		ClientIP:      clientIP(r),
+		UpstreamModel: live.UpstreamModel,
+		InboundPath:   r.URL.Path,
+		ThinkingLevel: live.ThinkingLevel,
 	}
 	s.pushRecent(log)
 	s.persist(log)
@@ -1387,6 +1575,7 @@ func (s *Server) recordResult(r *http.Request, k *key.Key, requestID, model stri
 		InboundPath:         r.URL.Path,
 		UpstreamHeaderMs:    res.UpstreamHeaderMs,
 		UpstreamContentType: res.UpstreamContentType,
+		ThinkingLevel:       s.liveThinkingLevel(requestID),
 	}
 	if providerName != "" {
 		log.UpstreamModel = s.mgr.UpstreamModel(model, providerName)
@@ -1439,6 +1628,7 @@ func (s *Server) persist(log *RequestLog) {
 		InboundPath:         log.InboundPath,
 		UpstreamHeaderMs:    log.UpstreamHeaderMs,
 		UpstreamContentType: log.UpstreamContentType,
+		ThinkingLevel:       log.ThinkingLevel,
 	}
 	go func() {
 		if err := s.store.RecordRequest(rec); err != nil {

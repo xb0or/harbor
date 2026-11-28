@@ -109,18 +109,19 @@ func TestRequestRoundTrip(t *testing.T) {
 	d, _ := openTest(t)
 
 	in := &Request{
-		RequestID:   "hr_test_req_1",
-		KeyID:       "key-1",
-		Model:       "gpt-4o",
-		Status:      "success",
-		ErrorCode:   "",
-		QueuedAt:    time.Date(2026, 8, 28, 10, 0, 0, 0, time.UTC),
-		StartedAt:   time.Date(2026, 8, 28, 10, 0, 1, 0, time.UTC),
-		FinishedAt:  time.Date(2026, 8, 28, 10, 0, 2, 0, time.UTC),
-		QueueWaitMs: 1234,
-		Attempts:    2,
-		TokensIn:    100,
-		TokensOut:   50,
+		RequestID:     "hr_test_req_1",
+		KeyID:         "key-1",
+		Model:         "gpt-4o",
+		Status:        "success",
+		ErrorCode:     "",
+		QueuedAt:      time.Date(2026, 8, 28, 10, 0, 0, 0, time.UTC),
+		StartedAt:     time.Date(2026, 8, 28, 10, 0, 1, 0, time.UTC),
+		FinishedAt:    time.Date(2026, 8, 28, 10, 0, 2, 0, time.UTC),
+		QueueWaitMs:   1234,
+		Attempts:      2,
+		TokensIn:      100,
+		TokensOut:     50,
+		ThinkingLevel: "max",
 	}
 	if err := d.RecordRequest(in); err != nil {
 		t.Fatalf("RecordRequest: %v", err)
@@ -136,14 +137,15 @@ func TestRequestRoundTrip(t *testing.T) {
 
 	// 覆盖更新：status 变化 + 空 Started/Finished（null 处理）
 	upd := &Request{
-		RequestID:   "hr_test_req_1",
-		KeyID:       "key-1",
-		Model:       "gpt-4o",
-		Status:      "error",
-		ErrorCode:   "upstream_error",
-		QueuedAt:    time.Date(2026, 8, 28, 10, 0, 0, 0, time.UTC),
-		QueueWaitMs: 99,
-		Attempts:    1,
+		RequestID:     "hr_test_req_1",
+		KeyID:         "key-1",
+		Model:         "gpt-4o",
+		Status:        "error",
+		ErrorCode:     "upstream_error",
+		QueuedAt:      time.Date(2026, 8, 28, 10, 0, 0, 0, time.UTC),
+		QueueWaitMs:   99,
+		Attempts:      1,
+		ThinkingLevel: "low",
 	}
 	if err := d.RecordRequest(upd); err != nil {
 		t.Fatalf("RecordRequest(update): %v", err)
@@ -154,6 +156,9 @@ func TestRequestRoundTrip(t *testing.T) {
 	}
 	if got2.Status != "error" || got2.ErrorCode != "upstream_error" {
 		t.Fatalf("update not applied: %+v", got2)
+	}
+	if got2.ThinkingLevel != "low" {
+		t.Fatalf("thinking level update lost: %+v", got2)
 	}
 	if !got2.StartedAt.IsZero() || !got2.FinishedAt.IsZero() {
 		t.Fatalf("null time should be zero: %+v", got2)

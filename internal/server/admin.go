@@ -119,6 +119,7 @@ func requestLogFromDB(rec *db.Request) *RequestLog {
 		InboundPath:         rec.InboundPath,
 		UpstreamHeaderMs:    rec.UpstreamHeaderMs,
 		UpstreamContentType: rec.UpstreamContentType,
+		ThinkingLevel:       rec.ThinkingLevel,
 	}
 }
 

@@ -139,6 +139,11 @@ func TestUI_Pages(t *testing.T) {
 	if !strings.Contains(js, "model.copy") || !strings.Contains(js, "copyText") {
 		t.Fatal("GET /admin.js model name must support click-to-copy")
 	}
+	for _, want := range []string{"排队中", "连接中", "等待响应", "响应中", "thinking_level", "withThinkingLevel"} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("GET /admin.js missing request-log status/thinking marker %q", want)
+		}
+	}
 	if strings.Contains(js, "不展示") {
 		t.Fatal("GET /admin.js must not keep the removed hidden/not-visible model state")
 	}

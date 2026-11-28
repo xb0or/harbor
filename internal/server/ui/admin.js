@@ -11,7 +11,6 @@
   var PROV_TYPES = ["openai-compatible", "openai", "azure-openai", "anthropic", "gemini", "deepseek", "custom"];
   var CAPS = ["chat", "embedding", "vision", "reasoning", "tools"];
   var CAP_LABEL = { chat: "对话", embedding: "向量", vision: "视觉", reasoning: "推理", tools: "工具" };
-  var REQ_STATUS = [["", "全部"], ["success", "成功"], ["error", "失败"], ["timeout", "超时"], ["cancelled", "取消"]];
   var COLS_KEY = "harbor.model.columns";
   var PROV_KEY = "harbor.model.provider";
 
@@ -329,7 +328,7 @@
 
   /* ================= 请求 ================= */
   var REQ_RANGES = [["today", "今天"], ["yesterday", "昨天"], ["7d", "7 天"], ["30d", "30 天"], ["month", "本月"], ["all", "全部"]];
-  var REQ_STATUS = [["", "全部状态"], ["success", "成功"], ["error", "失败"], ["timeout", "超时"], ["cancelled", "取消"]];
+  var REQ_STATUS = [["", "全部状态"], ["queued", "排队中"], ["connecting", "连接中"], ["waiting", "等待响应"], ["responding", "响应中"], ["success", "成功"], ["error", "失败"], ["timeout", "超时"], ["cancelled", "取消"]];
 
   function reqWindow(preset) {
     var now = new Date();
@@ -362,10 +361,23 @@
   }
 
   function reqElapsed(it) {
-    if (!it.started_at) return 0;
-    var start = new Date(it.started_at);
-    if (isNaN(start.getTime()) || start.getFullYear() < 1000) return 0;
-    return Math.max(0, new Date(it.finished_at) - start);
+    function parse(v) {
+      var d = new Date(v);
+      return isNaN(d.getTime()) || d.getFullYear() < 1000 ? null : d;
+    }
+    var start = parse(it.started_at) || parse(it.queued_at);
+    if (!start) return 0;
+    var end = parse(it.finished_at) || new Date();
+    return Math.max(0, end - start);
+  }
+
+  function reqWhen(it) {
+    var end = it.finished_at;
+    if (end) {
+      var d = new Date(end);
+      if (!isNaN(d.getTime()) && d.getFullYear() >= 1000) return end;
+    }
+    return it.queued_at;
   }
 
   function reqDuration(it) {
@@ -393,6 +405,10 @@
   }
 
   function reqStatusText(it) {
+    if (it.status === "queued") return "排队中";
+    if (it.status === "connecting") return "连接中";
+    if (it.status === "waiting") return "等待响应";
+    if (it.status === "responding") return "响应中";
     if (it.status === "success") return "成功 (200)";
     if (it.status === "timeout") return "超时";
     if (it.status === "cancelled") return "已取消";
@@ -400,11 +416,26 @@
   }
 
   function reqStatusCell(it) {
+    if (it.status === "queued") return '<span class="badge">● 排队中</span>';
+    if (it.status === "connecting") return '<span class="badge info">● 连接中</span>';
+    if (it.status === "waiting") return '<span class="badge info">● 等待响应</span>';
+    if (it.status === "responding") return '<span class="badge ok">● 响应中</span>';
     if (it.status === "success") return '<span class="badge ok">200</span>';
     if (it.status === "timeout") return '<span class="badge warn">超时</span>';
     if (it.status === "cancelled") return '<span class="badge">取消</span>';
     var code = it.upstream_http ? String(it.upstream_http) : "错误";
     return '<span class="badge err">' + esc(code) + "</span>";
+  }
+
+  function withThinkingLevel(model, level) {
+    var display = String(model || "");
+    level = String(level || "").toLowerCase();
+    if (!level) return display;
+    var lower = display.toLowerCase();
+    if (lower.indexOf("(" + level + ")") >= 0 || lower.indexOf("[" + level + "]") >= 0 || lower.indexOf("（" + level + "）") >= 0) {
+      return display;
+    }
+    return display + "(" + level + ")";
   }
 
   function reqModelCell(it) {
@@ -416,7 +447,7 @@
         if (m && m.upstream_model) upstream = m.upstream_model;
       }
     }
-    return '<div class="model-chain"><strong>' + esc(it.model) + (it.stream ? ' <span class="badge info">SSE</span>' : "") + "</strong>" +
+    return '<div class="model-chain"><strong>' + esc(withThinkingLevel(it.model, it.thinking_level)) + (it.stream ? ' <span class="badge info">SSE</span>' : "") + "</strong>" +
       (upstream ? "<small>→ " + esc(upstream) + "</small>" : "") + "</div>";
   }
 
@@ -478,7 +509,7 @@
     var r = state.reqs;
     var opt = state.reqOptions || { providers: [], keys: [], models: [], routes: [] };
     var rows = r.rows.map(function (it) {
-      return '<tr><td class="log-time">' + reqDate(it.finished_at) + "<small>" + reqClock(it.finished_at) + "</small></td>" +
+      return '<tr><td class="log-time">' + reqDate(reqWhen(it)) + "<small>" + reqClock(reqWhen(it)) + "</small></td>" +
         "<td>" + esc(it.provider || "—") + "</td>" +
         '<td class="mono" title="' + esc(it.key_id || "") + '">' + esc(it.key_id || "—") + "</td>" +
         '<td class="num">' + num(it.attempts) + "</td>" +
@@ -566,14 +597,18 @@
     var ms = reqElapsed(it);
     var total = (it.tokens_in || 0) + (it.tokens_out || 0);
     var speed = ms && it.tokens_out ? (it.tokens_out / (ms / 1000)).toFixed(1) + " tok/s" : "—";
-    var modelLine = it.provider ? (it.model + " → " + (it.upstream_model || it.model)) : it.model;
+    var modelLine = withThinkingLevel(it.model, it.thinking_level);
+    if (it.provider) {
+      modelLine += " → " + (it.upstream_model || it.model);
+    }
     var kvRows = [
-      ["时间", fmtTime(it.finished_at)],
+      ["时间", fmtTime(reqWhen(it))],
       ["请求 ID", it.request_id, true],
       ["入站路径", it.inbound_path || "—", true],
       ["上游 Request ID", it.upstream_request_id || "—", true],
       ["状态", reqStatusText(it)],
       ["流式", it.stream ? "是（SSE）" : "否（普通 JSON，全部生成完才返回）"],
+      ["思考等级", it.thinking_level || "—"],
       ["用时", ms ? fmtMs(ms) : "—"],
       ["首帧", it.first_token_ms ? fmtMs(it.first_token_ms) : "—"],
       ["上游响应头", it.upstream_header_ms ? fmtMs(it.upstream_header_ms) : "—"],
@@ -1667,9 +1702,14 @@
     clearInterval(state.pollTimer);
     state.pollTimer = setInterval(function () {
       if (document.hidden || !el.modal.hidden) return;
-      if (state.tab !== "overview" && state.tab !== "queue") return;
-      loadTab(state.tab);
-    }, 5000);
+      if (state.tab === "requests") {
+        var active = document.activeElement;
+        if (active && active.id === "req-q") return;
+        loadRequests().catch(function (e) { toast(e.message, true); });
+        return;
+      }
+      if (state.tab === "overview" || state.tab === "queue") loadTab(state.tab);
+    }, 2000);
     clearInterval(state.clockTimer);
     state.clockTimer = setInterval(tickClock, 1000);
     tickClock();

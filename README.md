@@ -153,11 +153,11 @@ qwen3.8-27b:dev             0.5      # 2 个请求共享 1 个槽
 </details>
 
 <details>
-<summary>请求页：审计字段与筛选</summary>
+<summary>请求页：实时状态、审计字段与筛选</summary>
 
-`GET /api/requests` 支持 `q`、`status`、`provider`、`model`、`key_id`、`since`、`until`（RFC3339 或 `YYYY-MM-DD`）、`limit`、`offset`。
+`GET /api/requests` 支持 `q`、`status`、`provider`、`model`、`key_id`、`since`、`until`（RFC3339 或 `YYYY-MM-DD`）、`limit`、`offset`。`status` 除最终状态外还支持进行中的 `queued` / `connecting` / `waiting` / `responding`；启用 SQLite 时，内存中的进行中记录会合并到列表第一页，完成后由落库记录替换。
 
-审计在原有字段上补了 `client_ua`、`client_ip`、`upstream_model`、`first_token_ms`（流式首帧耗时），以及链路观测字段 `inbound_path`（真实入站路径）、`upstream_header_ms`（上游响应头耗时）、`upstream_content_type`（上游 Content-Type）；旧库由对应 `migrateRequests*` 迁移补列，历史行这些字段为空。日期筛选按 `substr(finished_at,1,10)` 做日粒度比较，避开 SQLite 对带时区字符串的解析问题。
+审计除了 `client_ua`、`client_ip`、`upstream_model`、`first_token_ms` 和链路观测字段 `inbound_path`、`upstream_header_ms`、`upstream_content_type`，还记录 `thinking_level`（从 `reasoning_effort`、Responses `reasoning.effort`、`thinking` 或模型名 `(...)` 后缀提取）。旧库由对应 `migrateRequests*` 迁移补列，历史行这些字段为空。日期筛选按 `substr(finished_at,1,10)` 做日粒度比较，避开 SQLite 对带时区字符串的解析问题。
 
 </details>
 

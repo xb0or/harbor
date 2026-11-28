@@ -3,12 +3,63 @@ package server
 import (
 	"database/sql"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"harbor/internal/db"
 )
+
+// liveRequestSnapshot 返回进行中请求的副本（按开始时间倒序）。
+func (s *Server) liveRequestSnapshot() []*RequestLog {
+	s.recentMu.Lock()
+	defer s.recentMu.Unlock()
+	out := make([]*RequestLog, 0, 8)
+	for i := len(s.recentOrder) - 1; i >= 0; i-- {
+		log, ok := s.recent[s.recentOrder[i]]
+		if !ok || !isLiveStatus(log.Status) {
+			continue
+		}
+		cp := *log
+		out = append(out, &cp)
+	}
+	return out
+}
+
+// filterLiveRequests 按管理台筛选条件过滤进行中请求。
+func filterLiveRequests(logs []*RequestLog, search, status, providerName, modelName, keyID string, since, until time.Time) []*RequestLog {
+	out := make([]*RequestLog, 0, len(logs))
+	for _, log := range logs {
+		if !matchesRequestFilter(log, search, status) {
+			continue
+		}
+		if !since.IsZero() && log.QueuedAt.Before(since) {
+			continue
+		}
+		if !until.IsZero() && !log.QueuedAt.Before(until) {
+			continue
+		}
+		if providerName != "" && log.Provider != providerName {
+			continue
+		}
+		if modelName != "" && log.Model != modelName {
+			continue
+		}
+		if keyID != "" && log.KeyID != keyID {
+			continue
+		}
+		out = append(out, log)
+	}
+	return out
+}
+
+func requestSortTime(log *RequestLog) time.Time {
+	if !log.FinishedAt.IsZero() {
+		return log.FinishedAt
+	}
+	return log.QueuedAt
+}
 
 // handleListRequests GET /api/requests
 // 支持：q / status / provider / model / key_id / since（RFC3339 或 YYYY-MM-DD）/ limit / offset
@@ -29,7 +80,7 @@ func (s *Server) handleListRequests(w http.ResponseWriter, r *http.Request) {
 	search := strings.TrimSpace(q.Get("q"))
 	status := strings.TrimSpace(q.Get("status"))
 	switch status {
-	case "success", "error", "timeout", "cancelled":
+	case "success", "error", "timeout", "cancelled", "queued", "connecting", "waiting", "responding":
 	default:
 		status = ""
 	}
@@ -67,6 +118,40 @@ func (s *Server) handleListRequests(w http.ResponseWriter, r *http.Request) {
 		for _, rec := range recs {
 			out = append(out, requestLogFromDB(rec))
 		}
+		// DB 只有已结束记录；把内存中的进行中请求合并到第一页。
+		live := filterLiveRequests(s.liveRequestSnapshot(), search, status, providerName, modelName, keyID, since, until)
+		if len(live) > 0 {
+			if offset == 0 {
+				combined := make([]*RequestLog, 0, len(live)+len(out))
+				combined = append(combined, live...)
+				combined = append(combined, out...)
+				seen := make(map[string]bool, len(combined))
+				deduped := combined[:0]
+				for _, item := range combined {
+					if seen[item.RequestID] {
+						continue
+					}
+					seen[item.RequestID] = true
+					deduped = append(deduped, item)
+				}
+				sort.SliceStable(deduped, func(i, j int) bool {
+					return requestSortTime(deduped[i]).After(requestSortTime(deduped[j]))
+				})
+				if len(deduped) > limit {
+					deduped = deduped[:limit]
+				}
+				out = deduped
+			}
+			dbIDs := make(map[string]bool, len(recs))
+			for _, rec := range recs {
+				dbIDs[rec.RequestID] = true
+			}
+			for _, item := range live {
+				if !dbIDs[item.RequestID] {
+					total++
+				}
+			}
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"requests": out,
 			"total":    total,
@@ -83,10 +168,10 @@ func (s *Server) handleListRequests(w http.ResponseWriter, r *http.Request) {
 		if !ok || !matchesRequestFilter(log, search, status) {
 			continue
 		}
-		if !since.IsZero() && log.FinishedAt.Before(since) {
+		if !since.IsZero() && requestSortTime(log).Before(since) {
 			continue
 		}
-		if !until.IsZero() && !log.FinishedAt.Before(until) {
+		if !until.IsZero() && !requestSortTime(log).Before(until) {
 			continue
 		}
 		if providerName != "" && log.Provider != providerName {
@@ -98,7 +183,8 @@ func (s *Server) handleListRequests(w http.ResponseWriter, r *http.Request) {
 		if keyID != "" && log.KeyID != keyID {
 			continue
 		}
-		filtered = append(filtered, log)
+		cp := *log
+		filtered = append(filtered, &cp)
 	}
 	s.recentMu.Unlock()
 	total := len(filtered)
@@ -122,9 +208,14 @@ func (s *Server) handleRequestByID(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	s.recentMu.Lock()
 	log, ok := s.recent[id]
-	s.recentMu.Unlock()
+	var snapshot *RequestLog
 	if ok {
-		writeJSON(w, http.StatusOK, log)
+		cp := *log
+		snapshot = &cp
+	}
+	s.recentMu.Unlock()
+	if snapshot != nil {
+		writeJSON(w, http.StatusOK, snapshot)
 		return
 	}
 	if s.store != nil {
