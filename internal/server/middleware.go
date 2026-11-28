@@ -76,6 +76,12 @@ func (s *Server) logMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// isAdminPath 判断路径是否属于当前管理台入口（含相对静态资源）。
+func (s *Server) isAdminPath(path string) bool {
+	admin := s.AdminPath()
+	return path == admin || strings.HasPrefix(path, admin+"/")
+}
+
 func (s *Server) securityHeadersMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
@@ -84,10 +90,11 @@ func (s *Server) securityHeadersMiddleware(next http.Handler) http.Handler {
 		h.Set("Referrer-Policy", "no-referrer")
 		h.Set("Permissions-Policy", "camera=(), geolocation=(), microphone=()")
 		h.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
-		if strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/" || strings.HasPrefix(r.URL.Path, "/admin") {
+		adminPath := s.isAdminPath(r.URL.Path)
+		if strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/" || adminPath {
 			h.Set("Cache-Control", "no-store")
 		}
-		if strings.HasPrefix(r.URL.Path, "/admin") {
+		if adminPath {
 			// 管理台离线同源：禁止 inline style/script。进度条走 <progress>，布局走 class。
 			h.Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
 		}

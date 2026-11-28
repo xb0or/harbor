@@ -31,6 +31,7 @@ type storedRuntime struct {
 	MaxProviderAttempts *int             `json:"max_provider_attempts,omitempty"`
 	BackoffBaseMS       *int64           `json:"backoff_base_ms,omitempty"`
 	ProviderCooldownMS  *int64           `json:"provider_cooldown_ms,omitempty"`
+	AdminPath           *string          `json:"admin_path,omitempty"`
 	Keepalive           *storedKeepalive `json:"keepalive,omitempty"`
 }
 
@@ -126,6 +127,9 @@ func (s *Server) buildSettingFields() []settingField {
 	}
 	ka := s.keepaliveConfig()
 	fields = append(fields,
+		settingField{Group: "admin", Key: "admin_path", Label: "管理后台入口", Kind: "text", Value: s.AdminPath(), Editable: true, Source: cfgSource(), Note: "以 / 开头；不能用 /admin、/api、/v1；保存后旧入口立即失效。"},
+	)
+	fields = append(fields,
 		settingField{Group: "keepalive", Key: "keepalive_enabled", Label: "启用心跳保活", Kind: "bool", Value: ka.IsEnabled(), Editable: true, Source: cfgSource(), Note: "SSE / 流式响应静默时补空事件。"},
 		settingField{Group: "keepalive", Key: "keepalive_interval_ms", Label: "空闲间隔", Kind: "seconds", Value: ka.IntervalDuration().Milliseconds(), Editable: true, Source: cfgSource(), Note: "1–300 秒。"},
 		settingField{Group: "keepalive", Key: "keepalive_style", Label: "发送形式", Kind: "text", Value: ka.StyleValue(), Editable: true, Source: cfgSource(), Note: "comment = SSE 注释行；event = data 事件。"},
@@ -183,20 +187,22 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		"fields":     s.buildSettingFields(),
 		"env":        envView(),
 		"keepalive":  keepaliveViewOf(s.keepaliveConfig()),
+		"admin_path": s.AdminPath(),
 		"persistent": s.store != nil,
 	})
 }
 
 // settingsUpdate 是 PUT /api/settings 的请求体（全部可选）。
 type settingsUpdate struct {
-	QueueMaxWaitMS      *int64 `json:"queue_max_wait_ms"`
-	QueueMaxDepth       *int   `json:"queue_max_depth"`
-	Early429MS          *int64 `json:"early_429_ms"`
-	ExposeQueuePosition *bool  `json:"expose_queue_position"`
-	RequestTimeoutMS    *int64 `json:"request_timeout_ms"`
-	MaxProviderAttempts *int   `json:"max_provider_attempts"`
-	BackoffBaseMS       *int64 `json:"backoff_base_ms"`
-	ProviderCooldownMS  *int64 `json:"provider_cooldown_ms"`
+	QueueMaxWaitMS      *int64  `json:"queue_max_wait_ms"`
+	QueueMaxDepth       *int    `json:"queue_max_depth"`
+	Early429MS          *int64  `json:"early_429_ms"`
+	ExposeQueuePosition *bool   `json:"expose_queue_position"`
+	RequestTimeoutMS    *int64  `json:"request_timeout_ms"`
+	MaxProviderAttempts *int    `json:"max_provider_attempts"`
+	BackoffBaseMS       *int64  `json:"backoff_base_ms"`
+	ProviderCooldownMS  *int64  `json:"provider_cooldown_ms"`
+	AdminPath           *string `json:"admin_path"`
 	Keepalive           *struct {
 		Enabled    *bool   `json:"enabled"`
 		IntervalMS *int64  `json:"interval_ms"`
@@ -216,6 +222,12 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 	if err := validateSettingsUpdate(&req); err != nil {
 		s.writeError(w, s.newRequestID(), invalidRequestErr(err.Error()))
 		return
+	}
+	if req.AdminPath != nil {
+		if _, err := s.SetAdminPath(*req.AdminPath); err != nil {
+			s.writeError(w, s.newRequestID(), invalidRequestErr(err.Error()))
+			return
+		}
 	}
 
 	s.cfgMu.Lock()
@@ -286,8 +298,9 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		"request_timeout", s.cfg.Limits.RequestTimeout, "max_attempts", s.cfg.Limits.MaxProviderAttempts,
 		"keepalive", ka.IntervalDuration().String())
 	writeJSON(w, http.StatusOK, map[string]any{
-		"fields":    s.buildSettingFields(),
-		"keepalive": keepaliveViewOf(s.keepaliveConfig()),
+		"fields":     s.buildSettingFields(),
+		"keepalive":  keepaliveViewOf(s.keepaliveConfig()),
+		"admin_path": s.AdminPath(),
 	})
 }
 
@@ -322,6 +335,10 @@ func (s *Server) mergeStoredRuntime(req settingsUpdate) storedRuntime {
 	}
 	if req.ProviderCooldownMS != nil {
 		stored.ProviderCooldownMS = req.ProviderCooldownMS
+	}
+	if req.AdminPath != nil {
+		path := s.AdminPath()
+		stored.AdminPath = &path
 	}
 	if req.Keepalive != nil {
 		ka := s.keepaliveConfig()
@@ -367,6 +384,11 @@ func validateSettingsUpdate(req *settingsUpdate) error {
 	}
 	if req.MaxProviderAttempts != nil && (*req.MaxProviderAttempts < 1 || *req.MaxProviderAttempts > 100) {
 		return errors.New("max_provider_attempts 需在 1–100 之间")
+	}
+	if req.AdminPath != nil {
+		if _, err := config.NormalizeAdminPath(*req.AdminPath); err != nil {
+			return err
+		}
 	}
 	if req.Keepalive != nil {
 		if req.Keepalive.IntervalMS != nil && (*req.Keepalive.IntervalMS < 1000 || *req.Keepalive.IntervalMS > 300000) {
@@ -475,6 +497,11 @@ func ApplyStoredSettings(store *db.DB, cfg *config.Config, log *slog.Logger) {
 			}
 			if st.ProviderCooldownMS != nil {
 				cfg.Limits.ProviderCooldown = time.Duration(*st.ProviderCooldownMS * int64(time.Millisecond)).String()
+			}
+			if st.AdminPath != nil {
+				if path, err := config.NormalizeAdminPath(*st.AdminPath); err == nil {
+					cfg.Admin.Path = path
+				}
 			}
 			if st.Keepalive != nil {
 				applyStoredKeepalive(cfg, *st.Keepalive)

@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"harbor/internal/provider"
 )
 
 func validatePublicProviderURL(raw string) (*url.URL, error) {
@@ -88,7 +90,11 @@ func restrictedIP(ip net.IP) bool {
 func newSafeProbeClient(timeout time.Duration) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
-	transport.DialContext = safeDialContext
+	if dial := provider.ActiveProxyDialer(); dial != nil {
+		transport.DialContext = dial
+	} else {
+		transport.DialContext = safeDialContext
+	}
 	return &http.Client{
 		Transport: transport,
 		Timeout:   timeout,

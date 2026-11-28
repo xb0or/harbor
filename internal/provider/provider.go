@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/http/httptrace"
 	"sort"
@@ -168,6 +169,8 @@ type Snapshot struct {
 	TPH         int64
 	TPD         int64
 	PublicOnly  bool
+	Headers     map[string]string
+	PassHeaders bool
 }
 
 func (p *Provider) Snapshot() Snapshot {
@@ -185,7 +188,33 @@ func (p *Provider) Snapshot() Snapshot {
 		Timeout: p.Timeout, Cooldown: p.Cooldown,
 		Concurrency: p.Concurrency, RPM: p.RPM,
 		TPM: p.TPM, TPH: p.TPH, TPD: p.TPD,
-		PublicOnly: p.PublicOnly,
+		PublicOnly:  p.PublicOnly,
+		Headers:     cloneHeaders(p.Headers),
+		PassHeaders: p.PassHeaders,
+	}
+}
+
+func cloneHeaders(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+// passthroughHeaderAllowed 过滤客户端头：鉴权、内容协商、连接级与 Cookie
+// 不允许直接透传到上游，避免覆盖 Harbor 自己的凭证或污染上游会话。
+func passthroughHeaderAllowed(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "authorization", "content-type", "accept", "host", "content-length",
+		"connection", "transfer-encoding", "upgrade", "proxy-authorization",
+		"proxy-connection", "te", "trailer", "cookie", "set-cookie":
+		return false
+	default:
+		return true
 	}
 }
 
@@ -219,6 +248,8 @@ type Provider struct {
 	TPH         int64
 	TPD         int64
 	PublicOnly  bool
+	Headers     map[string]string
+	PassHeaders bool
 
 	mu    sync.RWMutex
 	creds []*Credential
@@ -239,6 +270,39 @@ var upstreamHTTPClient = &http.Client{
 		}
 		return nil
 	},
+}
+
+// proxyTransport 是管理台配置的全局出站代理（nil = 直连）。
+var proxyTransport atomic.Pointer[http.Transport]
+
+// SetProxyDialer 设置全局出站代理拨号器；nil 恢复直连。
+func SetProxyDialer(dial func(ctx context.Context, network, addr string) (net.Conn, error)) {
+	if dial == nil {
+		proxyTransport.Store(nil)
+		return
+	}
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.Proxy = nil
+	tr.DialContext = dial
+	proxyTransport.Store(tr)
+}
+
+func upstreamClient(publicOnly bool) *http.Client {
+	if tr := proxyTransport.Load(); tr != nil {
+		return &http.Client{Transport: tr, CheckRedirect: upstreamHTTPClient.CheckRedirect}
+	}
+	if publicOnly {
+		return publicOnlyHTTPClient
+	}
+	return upstreamHTTPClient
+}
+
+// ActiveProxyDialer 返回当前出站代理拨号器（nil = 直连）。
+func ActiveProxyDialer() func(ctx context.Context, network, addr string) (net.Conn, error) {
+	if tr := proxyTransport.Load(); tr != nil {
+		return tr.DialContext
+	}
+	return nil
 }
 
 // JoinURL 拼接上游 BaseURL 与请求路径。
@@ -332,6 +396,20 @@ func (p *Provider) UpdateLimits(concurrency int, rpm int, tpm, tph, tpd int64) {
 	p.TPH = tph
 	p.TPD = tpd
 	p.mu.Unlock()
+}
+
+// UpdateHeaders 更新发往该上游的自定义请求头与透传开关。
+func (p *Provider) UpdateHeaders(headers map[string]string, passThrough bool) {
+	p.mu.Lock()
+	p.Headers = cloneHeaders(headers)
+	p.PassHeaders = passThrough
+	p.mu.Unlock()
+}
+
+func (p *Provider) HeaderConfig() (map[string]string, bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return cloneHeaders(p.Headers), p.PassHeaders
 }
 
 func (p *Provider) UpdateType(typ string) {
@@ -569,15 +647,19 @@ type ModelRoute struct {
 type Manager struct {
 	mu        sync.RWMutex
 	providers map[string]*Provider
+	order     []string
 	mappings  map[string][]ModelRoute // unified model -> routes（顺序即优先级）
 	timeout   time.Duration
 	cooldown  time.Duration
 }
 
-// NewManager 从运行时 Provider 列表构造。
+// NewManager 从运行时 Provider 列表构造（输入顺序即优先级）。
 func NewManager(providers []*Provider, mappings map[string][]ModelRoute) *Manager {
 	m := &Manager{providers: map[string]*Provider{}, mappings: map[string][]ModelRoute{}}
 	for _, p := range providers {
+		if _, exists := m.providers[p.Name]; !exists {
+			m.order = append(m.order, p.Name)
+		}
 		m.providers[p.Name] = p
 	}
 	for k, v := range mappings {
@@ -597,21 +679,51 @@ func (m *Manager) Get(name string) (*Provider, bool) {
 // GetProvider 按名字获取 Provider（Get 的别名）。
 func (m *Manager) GetProvider(name string) (*Provider, bool) { return m.Get(name) }
 
-// Providers 返回全部 Provider。
+// Providers 返回全部 Provider（按优先级）。
 func (m *Manager) Providers() []*Provider {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	out := make([]*Provider, 0, len(m.providers))
-	for _, p := range m.providers {
-		out = append(out, p)
+	seen := make(map[string]bool, len(m.providers))
+	for _, name := range m.order {
+		if p, ok := m.providers[name]; ok {
+			out = append(out, p)
+			seen[name] = true
+		}
+	}
+	for name, p := range m.providers {
+		if !seen[name] {
+			out = append(out, p)
+		}
 	}
 	return out
+}
+
+// ReorderProviders 按给定顺序重排 Provider；必须覆盖全部现有 Provider。
+func (m *Manager) ReorderProviders(names []string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(names) != len(m.providers) {
+		return false
+	}
+	seen := make(map[string]bool, len(names))
+	for _, name := range names {
+		if _, ok := m.providers[name]; !ok || seen[name] {
+			return false
+		}
+		seen[name] = true
+	}
+	m.order = append([]string(nil), names...)
+	return true
 }
 
 // AddProvider 注册一个新 Provider（管理 API 用）。
 func (m *Manager) AddProvider(p *Provider) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if _, exists := m.providers[p.Name]; !exists {
+		m.order = append(m.order, p.Name)
+	}
 	m.providers[p.Name] = p
 }
 
@@ -623,6 +735,12 @@ func (m *Manager) RemoveProvider(name string) bool {
 		return false
 	}
 	delete(m.providers, name)
+	for i, existing := range m.order {
+		if existing == name {
+			m.order = append(m.order[:i], m.order[i+1:]...)
+			break
+		}
+	}
 	for model, routes := range m.mappings {
 		var kept []ModelRoute
 		for _, r := range routes {
@@ -733,13 +851,8 @@ func (m *Manager) ModelProviders(model string) []*Provider {
 			return out
 		}
 	}
-	// 自动路由：查找 Models 列表包含该模型的 Provider
-	m.mu.RLock()
-	providers := make([]*Provider, 0, len(m.providers))
-	for _, p := range m.providers {
-		providers = append(providers, p)
-	}
-	m.mu.RUnlock()
+	// 自动路由：按 Provider 优先级查找 Models 列表包含该模型的 Provider
+	providers := m.Providers()
 	var out []*Provider
 	for _, p := range providers {
 		if p.SupportsModel(model) {
@@ -992,6 +1105,8 @@ type Request struct {
 	// PhaseHook 接收请求阶段变化：waiting（请求已写出）/ responding（收到首字节）。
 	// nil 时零开销，不影响转发字节。
 	PhaseHook func(phase string)
+	// InboundHeaders 是客户端原始请求头，供 Provider 的透传开关使用。
+	InboundHeaders http.Header
 }
 
 // parseRetryAfter 解析 delta-seconds / HTTP-date；无效、过期或超出 Duration 范围则忽略。
@@ -1047,6 +1162,25 @@ func (p *Provider) Execute(ctx context.Context, req *Request) (*Response, error)
 		}
 		httpReq.Header.Set(k, v)
 	}
+	customHeaders, passHeaders := p.HeaderConfig()
+	if passHeaders {
+		for name, values := range req.InboundHeaders {
+			if !passthroughHeaderAllowed(name) {
+				continue
+			}
+			for _, value := range values {
+				httpReq.Header.Add(name, value)
+			}
+		}
+	}
+	for name, value := range customHeaders {
+		lower := strings.ToLower(strings.TrimSpace(name))
+		if lower == "" || lower == "host" || lower == "content-length" ||
+			lower == "connection" || lower == "transfer-encoding" {
+			continue
+		}
+		httpReq.Header.Set(name, value)
+	}
 	if req.Stream {
 		// SSE 必须直接传递增量：默认 gzip 协商会让未同步刷新的压缩层
 		// 缓存数据到流结束。放在自定义头之后，保证流式约束不会被覆盖。
@@ -1088,10 +1222,7 @@ func (p *Provider) Execute(ctx context.Context, req *Request) (*Response, error)
 		}
 	}
 
-	client := upstreamHTTPClient
-	if snapshot.PublicOnly {
-		client = publicOnlyHTTPClient
-	}
+	client := upstreamClient(snapshot.PublicOnly)
 	startedAt := time.Now()
 	resp, err := client.Do(httpReq)
 	if ttfbTimer != nil {

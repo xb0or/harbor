@@ -50,6 +50,9 @@ providers:
     tph: 60000000
     tpd: 1000000000
     credentials: ["${OPENAI_API_KEY}"]
+    headers:            # 可选：发往该上游的自定义请求头
+      X-Title: Harbor
+    pass_headers: false # 可选：透传客户端请求头（过滤鉴权/Cookie/连接级头）
 
 routes:
   gpt-4o: { providers: [openai] }
@@ -60,6 +63,7 @@ keys:
 
 admin:
   token: ""           # 留空 = 管理接口关闭
+  path: /harbor-console  # 管理台入口；不能用 /admin、/api、/v1
 ```
 
 确认进程起来了（`/v1/models` 要带 Harbor Key）：
@@ -68,7 +72,7 @@ admin:
 curl.exe -s http://127.0.0.1:8080/v1/models -H "Authorization: Bearer hr-live-demo-00000000"
 ```
 
-`/` 是内置落地页，`/admin` 是管理台。
+`/` 是内置落地页；管理台入口默认 `/harbor-console`，可在设置页改成任意非 `/admin`、`/api`、`/v1` 的路径，且不会在落地页暴露入口。
 
 ## 它是怎么工作的
 
@@ -110,13 +114,15 @@ qwen3.8-27b:dev             0.5      # 2 个请求共享 1 个槽
 | 排队 | 内存 FIFO · 事件驱动调度 · 挂起原请求 · `X-Queue-Position` · 超时/队满 → 429 |
 | 容错 | 多凭证 / 多 Provider failover · 冷却 · `Retry-After`（整数秒 + HTTP 日期）· 重试总预算 |
 | 流式 | SSE · 空闲心跳保活 · `X-Accel-Buffering: no` · 客户端断开即释放 |
-| 可观测 | `X-Request-Id` 贯穿 · 请求审计落库 · 管理台七页 · p50/p95 等待 |
+| 可观测 | `X-Request-Id` 贯穿 · 请求审计落库 · 实时请求状态 · 系统日志 · 管理台九页 · p50/p95 等待 |
+| 出站 | 全局 HTTP / SOCKS5 代理 · Clash 订阅节点导入 · 直连/代理切换 |
+| 上游请求头 | 按 Provider 自定义请求头 · 可选透传客户端请求头（过滤鉴权/Cookie/连接级头） |
 | 持久化 | SQLite 可选 · 凭证 AES-256-GCM · 运行设置热改落库 |
 | 部署 | 单二进制 / Dockerfile / Zeabur / Fly.io / 反向代理 |
 
 ## 管理台
 
-`/admin`：概览 / 队列 / 请求 / 密钥 / 上游 / 模型 / 设置。同源、无 CDN、无外部字体，CSP 为 `default-src 'self'`，不写行内样式；token 只存 `sessionStorage`，不进 URL、不落 Cookie。
+管理台入口默认 `/harbor-console`（可在设置页热改）：概览 / 队列 / 请求 / 密钥 / 上游 / 模型 / 网络 / 日志 / 设置。同源、无 CDN、无外部字体，CSP 为 `default-src 'self'`，不写行内样式；token 只存 `sessionStorage`，不进 URL、不落 Cookie。上游页为列表，拖动行即可调整优先级；网络页支持 HTTP / SOCKS5 节点与 Clash 订阅导入；日志页展示进程内最近 2000 条系统日志。
 
 设置页的热改项立即生效，写进 `settings` 表的 `runtime` 键，重启后由 `ApplyStoredSettings` 重放（存储优先于 yaml）：
 
@@ -125,6 +131,7 @@ qwen3.8-27b:dev             0.5      # 2 个请求共享 1 个槽
 | 排队 | 最长等待 / 队列容量 / 返回排队位置 | 调度器 `SetLimits` |
 | 超时与重试 | 请求总超时 / 最大尝试 / 退避基数 / 冷却 | 请求链路与执行器 `SetPolicy` |
 | 心跳保活 | 开关 / 间隔 / 形式 / 注释 | 排队与流式转发 |
+| 管理后台 | 入口路径 | 路由分发；旧路径立即 404 |
 
 只读项（监听地址、请求体上限、读写/空闲超时、在途预算、SQLite 与密钥路径、日志、admin token）和白名单环境变量（`PORT`、`HARBOR_CONFIG`、`HARBOR_DB_PATH`、`HARBOR_KEY_PATH`、`HARBOR_KEY`、`HARBOR_ADMIN_TOKEN`、`OPENAI_API_KEY`、`FLY_*`）只做展示；敏感值只显示「已设置」。
 

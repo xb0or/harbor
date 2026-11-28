@@ -68,6 +68,13 @@ type Server struct {
 
 	reqSeq atomic.Uint64
 
+	// adminPath 是管理台入口路径（运行时可改）。
+	adminPath atomic.Value // string
+
+	// 出站代理（管理台可热更新）。
+	proxyMu  sync.RWMutex
+	proxyCfg proxySettings
+
 	gateMu  sync.Mutex
 	gateMap map[string]*gateSet // provider name -> gates
 
@@ -145,13 +152,38 @@ func New(cfg *config.Config, keys *key.Store, mgr *provider.Manager, exec *execu
 		recent:     map[string]*RequestLog{},
 		ka:         ka,
 	}
-	sched.SetEarlyWait(cfg.Queue.Early429AfterDuration())
+	s.adminPath.Store(cfg.Admin.PathValue())
+	s.loadProxyConfig()
+	s.sched.SetEarlyWait(cfg.Queue.Early429AfterDuration())
 	sched.OnFinished = s.onFinished
 	s.requestTimeoutNs.Store(int64(cfg.Limits.RequestTimeoutDuration()))
 	s.streamTTFBNs.Store(int64(cfg.Limits.StreamTTFBTimeoutDuration()))
 	s.streamIdleNs.Store(int64(cfg.Limits.StreamIdleTimeoutDuration()))
 	s.exposeQueuePos.Store(cfg.Queue.ExposeQueuePosition)
 	return s
+}
+
+// AdminPath 返回当前管理台入口路径。
+func (s *Server) AdminPath() string {
+	if v := s.adminPath.Load(); v != nil {
+		if path, ok := v.(string); ok && path != "" {
+			return path
+		}
+	}
+	return "/harbor-console"
+}
+
+// SetAdminPath 热更新管理台入口路径。
+func (s *Server) SetAdminPath(raw string) (string, error) {
+	path, err := config.NormalizeAdminPath(raw)
+	if err != nil {
+		return "", err
+	}
+	s.adminPath.Store(path)
+	s.cfgMu.Lock()
+	s.cfg.Admin.Path = path
+	s.cfgMu.Unlock()
+	return path, nil
 }
 
 // Handler 返回 HTTP Handler（含中间件）。
@@ -423,6 +455,7 @@ func (s *Server) handleOpenAI(inboundPath string) http.HandlerFunc {
 			PhaseHook: func(phase string) {
 				s.setLiveStatus(requestID, phase)
 			},
+			InboundHeaders: r.Header,
 		}
 
 		lease := s.newProviderLease(meta.Model)

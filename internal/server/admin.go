@@ -42,6 +42,7 @@ func (s *Server) registerAdmin(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/keys/{id}/unban", withAuth(s.handleUnbanKey))
 	mux.HandleFunc("GET /api/providers", withAuth(s.handleListProviders))
 	mux.HandleFunc("POST /api/providers", withAuth(s.handleCreateProvider))
+	mux.HandleFunc("PUT /api/providers/order", withAuth(s.handleReorderProviders))
 	mux.HandleFunc("POST /api/providers/probe-models", withAuth(s.handleProbeModels))
 	mux.HandleFunc("GET /api/providers/{name}/models", withAuth(s.handleProviderModels))
 	mux.HandleFunc("PUT /api/providers/{name}/models", withAuth(s.handlePutProviderModels))
@@ -51,6 +52,10 @@ func (s *Server) registerAdmin(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/settings", withAuth(s.handleGetSettings))
 	mux.HandleFunc("PUT /api/settings", withAuth(s.handlePutSettings))
 	mux.HandleFunc("PUT /api/settings/keepalive", withAuth(s.handlePutKeepalive))
+	mux.HandleFunc("GET /api/logs", withAuth(s.handleLogs))
+	mux.HandleFunc("GET /api/proxy", withAuth(s.handleGetProxy))
+	mux.HandleFunc("PUT /api/proxy", withAuth(s.handlePutProxy))
+	mux.HandleFunc("POST /api/proxy/clash", withAuth(s.handleProxyClash))
 	mux.HandleFunc("PUT /api/providers/{name}", withAuth(s.handleUpdateProvider))
 	mux.HandleFunc("DELETE /api/providers/{name}", withAuth(s.handleDeleteProvider))
 	mux.HandleFunc("POST /api/providers/{name}/credentials", withAuth(s.handleAddCredential))
@@ -183,6 +188,13 @@ func (s *Server) persistProvider(p *provider.Provider) {
 		return
 	}
 	view := p.Snapshot()
+	sortOrder := 0
+	for i, candidate := range s.mgr.Providers() {
+		if candidate.Name == view.Name {
+			sortOrder = i
+			break
+		}
+	}
 	row := &db.ProviderRow{
 		ID:          view.Name,
 		Name:        view.Name,
@@ -197,6 +209,9 @@ func (s *Server) persistProvider(p *provider.Provider) {
 		TPM:         view.TPM,
 		TPH:         view.TPH,
 		TPD:         view.TPD,
+		SortOrder:   sortOrder,
+		Headers:     view.Headers,
+		PassHeaders: view.PassHeaders,
 		CreatedAt:   time.Now(),
 	}
 	if err := s.store.UpsertProvider(row); err != nil {

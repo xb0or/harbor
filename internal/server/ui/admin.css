@@ -336,6 +336,17 @@ textarea.ctl { height: auto; min-height: 72px; padding: 8px 10px; resize: vertic
 
 /* ---------- 10. 页面：上游 ---------- */
 .provider-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 14px; }
+.provider-list { display: flex; flex-direction: column; gap: 10px; }
+.provider-row { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-md); }
+.provider-row.dragging { opacity: .55; }
+.provider-row-head { display: grid; grid-template-columns: 22px minmax(140px, .9fr) auto minmax(180px, 1.4fr) minmax(220px, 1fr) auto; align-items: center; gap: 12px; padding: 11px 14px; }
+.drag-handle { color: var(--faint); cursor: grab; user-select: none; font-size: 15px; line-height: 1; }
+.provider-row-head:active .drag-handle { cursor: grabbing; }
+.provider-identity { min-width: 0; }
+.provider-limits { display: flex; flex-wrap: wrap; gap: 4px 12px; color: var(--mut); font-size: 11px; }
+.provider-limits b { color: var(--dim); font-weight: 500; }
+.provider-row-body { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; padding: 12px 14px 14px 48px; border-top: 1px solid var(--line); background: var(--surface-2); border-radius: 0 0 var(--r-md) var(--r-md); }
+.log-attrs { max-width: 520px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dim); font-size: 11px; }
 .provider { display: flex; flex-direction: column; gap: 14px; padding: 16px 18px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); }
 .provider-top { display: flex; align-items: flex-start; gap: 10px; }
 .provider-mark { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 9px; background: var(--accent-soft); color: var(--accent); }
@@ -434,6 +445,10 @@ textarea.ctl { height: auto; min-height: 72px; padding: 8px 10px; resize: vertic
   .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .overview-grid { grid-template-columns: minmax(0, 1fr); }
   .provider-grid { grid-template-columns: minmax(0, 1fr); }
+  .provider-row-head { grid-template-columns: 22px minmax(120px, 1fr) auto; }
+  .provider-row-head .provider-url, .provider-row-head .provider-limits { grid-column: 1 / -1; }
+  .provider-row-head .provider-actions { grid-column: 2 / -1; justify-self: end; }
+  .provider-row-body { grid-template-columns: minmax(0, 1fr); padding-left: 14px; }
 }
 @media (max-width: 900px) {
   .rail { transform: translateX(-100%); transition: transform .2s var(--ease); box-shadow: var(--shadow-2); }

@@ -77,6 +77,8 @@ keys:
 
 admin:
   token: ${HARBOR_ADMIN_TOKEN}
+  # 管理台入口；默认 /harbor-console，可在管理台设置页热改。
+  path: /harbor-console
 
 storage:
   db_path: ${HARBOR_DB_PATH}

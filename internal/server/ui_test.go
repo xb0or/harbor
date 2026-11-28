@@ -1,7 +1,7 @@
 package server
 
 // 管理前端与请求列表端点测试：
-//   - GET / 与 GET /admin 返回内嵌管理页面（不再 404），未匹配路径仍 404
+//   - GET / 与自定义管理入口返回内嵌页面；旧 /admin 必须 404
 //   - 页面登录脚本必须先校验 /api/stats，错误 token 不能直接进入管理台
 //   - GET /api/requests：无 token 401；纯内存模式列出 recent；持久化模式查 SQLite
 
@@ -46,9 +46,11 @@ func TestUI_Pages(t *testing.T) {
 	up := newMockUpstream(10 * time.Millisecond)
 	ups := httptest.NewServer(up.Handler())
 	defer ups.Close()
-	handler, _, _ := buildTestServer(t, testConfig(), ups)
+	cfg := testConfig()
+	handler, _, _ := buildTestServer(t, cfg, ups)
 	ts := httptest.NewServer(handler)
 	defer ts.Close()
+	adminPath := cfg.Admin.PathValue()
 
 	status, ct, src := fetchBody(t, ts.URL+"/")
 	if status != 200 {
@@ -66,43 +68,55 @@ func TestUI_Pages(t *testing.T) {
 	if strings.Contains(src, "Harbor 本身只提供") {
 		t.Fatal("GET / leftover 'no frontend' copy")
 	}
+	if strings.Contains(src, `href="/admin"`) {
+		t.Fatal("GET / must not expose the legacy admin entry")
+	}
+	if !strings.Contains(src, "https://github.com/xb0or/harbor") {
+		t.Fatal("GET / missing GitHub link")
+	}
+	if status, _, _ := fetchBody(t, ts.URL+"/admin"); status != http.StatusNotFound {
+		t.Fatalf("GET /admin status=%d want 404", status)
+	}
 
-	status, ct, src = fetchBody(t, ts.URL+"/admin")
+	status, ct, src = fetchBody(t, ts.URL+adminPath)
 	if status != 200 {
-		t.Fatalf("GET /admin status=%d want 200", status)
+		t.Fatalf("GET %s status=%d want 200", adminPath, status)
 	}
 	if !strings.Contains(ct, "text/html") {
-		t.Fatalf("GET /admin content-type=%q", ct)
+		t.Fatalf("GET %s content-type=%q", adminPath, ct)
 	}
 	if !strings.Contains(src, "Harbor") {
-		t.Fatal("GET /admin body missing page marker")
+		t.Fatalf("GET %s body missing page marker", adminPath)
 	}
 	if !strings.Contains(src, `id="login-err"`) {
-		t.Fatal("GET /admin missing login error element")
+		t.Fatalf("GET %s missing login error element", adminPath)
+	}
+	if !strings.Contains(src, "https://github.com/xb0or/harbor") {
+		t.Fatalf("GET %s missing GitHub link", adminPath)
 	}
 	if strings.Contains(src, "unpkg.com") || strings.Contains(src, "cdn.jsdelivr.net") || strings.Contains(src, "alpinejs") {
-		t.Fatal("GET /admin must not load CDN scripts")
+		t.Fatalf("GET %s must not load CDN scripts", adminPath)
 	}
 	if strings.Contains(src, "bg-canvas") {
-		t.Fatal("GET /admin leftover particle canvas")
+		t.Fatalf("GET %s leftover particle canvas", adminPath)
 	}
 
-	hdr := fetchHeaders(t, ts.URL+"/admin")
+	hdr := fetchHeaders(t, ts.URL+adminPath)
 	csp := hdr.Get("Content-Security-Policy")
 	if !strings.Contains(csp, "style-src 'self'") || !strings.Contains(csp, "script-src 'self'") {
-		t.Fatalf("GET /admin missing strict CSP, got %q", csp)
+		t.Fatalf("GET %s missing strict CSP, got %q", adminPath, csp)
 	}
 	if strings.Contains(csp, "unsafe-inline") {
-		t.Fatal("GET /admin CSP must not allow unsafe-inline")
+		t.Fatalf("GET %s CSP must not allow unsafe-inline", adminPath)
 	}
 
-	_, _, css := fetchBody(t, ts.URL+"/admin.css")
+	_, _, css := fetchBody(t, ts.URL+adminPath+"/admin.css")
 	if !strings.Contains(css, "--accent") || !strings.Contains(css, "--surface") {
-		t.Fatal("GET /admin.css missing design tokens")
+		t.Fatalf("GET %s/admin.css missing design tokens", adminPath)
 	}
-	_, jsCT, js := fetchBody(t, ts.URL+"/admin.js")
+	_, jsCT, js := fetchBody(t, ts.URL+adminPath+"/admin.js")
 	if !strings.Contains(jsCT, "javascript") {
-		t.Fatalf("GET /admin.js content-type=%q", jsCT)
+		t.Fatalf("GET %s/admin.js content-type=%q", adminPath, jsCT)
 	}
 	if !strings.Contains(js, "token 无效") {
 		t.Fatal("GET /admin login must reject invalid token")
@@ -138,6 +152,11 @@ func TestUI_Pages(t *testing.T) {
 	}
 	if !strings.Contains(js, "model.copy") || !strings.Contains(js, "copyText") {
 		t.Fatal("GET /admin.js model name must support click-to-copy")
+	}
+	for _, want := range []string{"loadProxy", "loadLogs", "/api/providers/order", "pass_headers", "/api/logs"} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("GET /admin.js missing feature marker %q", want)
+		}
 	}
 	for _, want := range []string{"排队中", "连接中", "等待响应", "响应中", "thinking_level", "withThinkingLevel"} {
 		if !strings.Contains(js, want) {

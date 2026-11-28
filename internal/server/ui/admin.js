@@ -7,7 +7,7 @@
 
   /* ================= 常量 ================= */
   var TOKEN_KEY = "harbor.admin.token";
-  var TABS = { overview: "概览", queue: "队列", requests: "请求", keys: "密钥", providers: "上游", models: "模型", settings: "设置" };
+  var TABS = { overview: "概览", queue: "队列", requests: "请求", keys: "密钥", providers: "上游", models: "模型", proxy: "网络", logs: "日志", settings: "设置" };
   var PROV_TYPES = ["openai-compatible", "openai", "azure-openai", "anthropic", "gemini", "deepseek", "custom"];
   var CAPS = ["chat", "embedding", "vision", "reasoning", "tools"];
   var CAP_LABEL = { chat: "对话", embedding: "向量", vision: "视觉", reasoning: "推理", tools: "工具" };
@@ -78,6 +78,8 @@
     keys: [],
     providers: [],
     models: { provider: "", rows: [], q: "", status: "all", view: "all", pick: {}, pickQ: "", probe: null, cols: { ctx: true, caps: true } },
+    proxy: { mode: "direct", active: "", nodes: [], clash_url: "" },
+    logs: { rows: [], level: "" },
     settings: null
   };
 
@@ -107,6 +109,8 @@
       keys: $("#tab-keys"),
       providers: $("#tab-providers"),
       models: $("#tab-models"),
+      proxy: $("#tab-proxy"),
+      logs: $("#tab-logs"),
       settings: $("#tab-settings")
     }
   };
@@ -803,33 +807,38 @@
   /* ================= 上游 ================= */
   async function loadProviders() {
     var data = await api("/api/providers");
-    state.providers = (data.providers || []).slice().sort(function (a, b) { return a.name.localeCompare(b.name); });
+    state.providers = data.providers || [];
     renderProviders();
   }
 
-  function providerCard(p) {
+  function providerRow(p) {
     var creds = (p.credentials || []).map(function (c) {
       return '<div class="cred-row"><span class="id">' + esc(c.id) + '</span>' +
         statusBadge(c.status) +
         '<button type="button" class="icon-btn danger" data-act="prov.credRemove" data-name="' + esc(p.name) + '" data-cred="' + esc(c.id) + '" aria-label="移除凭证">' + icon("x") + '</button></div>';
     }).join("") || '<p class="hint">还没有凭证，添加后即可转发。</p>';
-    var models = (p.models || []).map(function (m) { return '<span class="chip">' + esc(m) + '</span>'; }).join("") || '<p class="hint">未限制模型范围</p>';
+    var models = (p.models || []).map(function (m) { return '<span class="chip">' + esc(m) + '</span>'; }).join("") || '<span class="hint">未限制模型范围</span>';
     var limits = [["并发", p.concurrency], ["RPM", p.rpm], ["TPM", p.tpm], ["TPH", p.tph], ["TPD", p.tpd]]
-      .map(function (x) { return '<div><span>' + esc(x[0]) + '</span><strong>' + (Number(x[1]) > 0 ? num(x[1]) : "∞") + '</strong></div>'; }).join("");
-
-    return '<article class="provider"><div class="provider-top"><div class="provider-mark">' + icon("server") + '</div>' +
-      '<div><div class="provider-name">' + esc(p.name) + '</div><div class="provider-type">' + esc(p.type) + '</div></div>' +
-      '<div class="spacer"></div>' + statusBadge(p.available ? "active" : "unavailable") + '</div>' +
-      '<div class="provider-url">' + esc(p.base_url) + '</div>' +
-      '<div class="limits">' + limits + '</div>' +
+      .map(function (x) { return '<span><b>' + esc(x[0]) + '</b> ' + (Number(x[1]) > 0 ? num(x[1]) : "∞") + "</span>"; }).join("");
+    var headers = Object.keys(p.headers || {}).length ? Object.keys(p.headers).join(", ") : "默认";
+    return '<article class="provider-row" draggable="true" data-name="' + esc(p.name) + '">' +
+      '<div class="provider-row-head">' +
+      '<span class="drag-handle" title="拖动调整优先级" aria-hidden="true">⠿</span>' +
+      '<div class="provider-identity"><div class="provider-name">' + esc(p.name) + '</div><div class="provider-type">' + esc(p.type) + '</div></div>' +
+      statusBadge(p.available ? "active" : "unavailable") +
+      '<div class="provider-url mono" title="' + esc(p.base_url) + '">' + esc(p.base_url) + '</div>' +
+      '<div class="provider-limits">' + limits + '</div>' +
+      '<div class="provider-actions"><button type="button" class="btn ghost sm" data-act="prov.edit" data-name="' + esc(p.name) + '">' + icon("sliders-horizontal") + '编辑</button>' +
+      '<button type="button" class="icon-btn danger" data-act="prov.remove" data-name="' + esc(p.name) + '" aria-label="删除上游">' + icon("trash-2") + '</button></div>' +
+      '</div>' +
+      '<div class="provider-row-body">' +
       '<div class="provider-section"><h4>模型范围</h4><div class="cell">' + models + '</div></div>' +
       '<div class="provider-section"><h4>访问凭证</h4>' + creds +
       '<form class="inline-form" data-form="prov.credAdd" data-name="' + esc(p.name) + '">' +
       '<input class="ctl" type="password" name="secret" autocomplete="new-password" placeholder="输入上游 API Key" required>' +
       '<button type="submit" class="btn ghost sm">' + icon("plus") + '添加</button></form></div>' +
-      '<div class="provider-actions"><button type="button" class="btn ghost sm" data-act="prov.edit" data-name="' + esc(p.name) + '">' + icon("sliders-horizontal") + '编辑配置</button>' +
-      '<div class="spacer"></div>' +
-      '<button type="button" class="icon-btn danger" data-act="prov.remove" data-name="' + esc(p.name) + '" aria-label="删除上游">' + icon("trash-2") + '</button></div></article>';
+      '<div class="provider-section"><h4>请求头</h4><span class="hint">' + esc(headers) + (p.pass_headers ? " · 透传客户端头" : "") + '</span></div>' +
+      '</div></article>';
   }
 
   function renderProviders() {
@@ -839,7 +848,7 @@
     var models = list.reduce(function (s, p) { return s + (p.models || []).length; }, 0);
 
     el.pages.providers.innerHTML =
-      pageHead("HARBOR / UPSTREAM", "上游服务", "连接模型服务、管理凭证与账号配额；模型映射在「模型」页维护。",
+      pageHead("HARBOR / UPSTREAM", "上游服务", "列表顺序即优先级；拖动行调整顺序。模型映射在「模型」页维护。",
         '<button type="button" class="btn ghost" data-act="prov.reload">' + icon("refresh") + '刷新</button>' +
         '<button type="button" class="btn" data-act="prov.create">' + icon("plus") + '连接上游</button>') +
       '<div class="stats">' +
@@ -847,9 +856,47 @@
       statCard("key", "访问凭证", num(creds), "已配置的上游 Key") +
       statCard("layers-3", "模型声明", num(models), "跨上游合计") +
       '</div>' +
-      '<div class="provider-grid" data-block>' + (list.length ? list.map(providerCard).join("") :
+      '<div class="provider-list" data-block>' + (list.length ? list.map(providerRow).join("") :
         emptyState("server", "连接第一个上游", "填写服务地址与访问凭证，就能开始转发请求。",
           '<button type="button" class="btn" data-act="prov.create">' + icon("plus") + '连接上游</button>')) + '</div>';
+    bindProviderDrag();
+  }
+
+  function bindProviderDrag() {
+    var list = $(".provider-list");
+    if (!list) return;
+    var dragging = null;
+    $$(".provider-row", list).forEach(function (row) {
+      row.addEventListener("dragstart", function (e) {
+        dragging = row;
+        row.classList.add("dragging");
+        if (e.dataTransfer) { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", row.getAttribute("data-name")); }
+      });
+      row.addEventListener("dragend", async function () {
+        row.classList.remove("dragging");
+        if (!dragging) return;
+        var rows = $$(".provider-row", list);
+        var names = rows.map(function (r) { return r.getAttribute("data-name"); });
+        var byName = {};
+        state.providers.forEach(function (p) { byName[p.name] = p; });
+        state.providers = names.map(function (name) { return byName[name]; }).filter(Boolean);
+        dragging = null;
+        try {
+          await api("/api/providers/order", { method: "PUT", body: JSON.stringify({ names: names }) });
+          toast("优先级已保存");
+        } catch (e) {
+          toast(e.message, true);
+          await loadProviders();
+        }
+      });
+      row.addEventListener("dragover", function (e) {
+        e.preventDefault();
+        if (!dragging || dragging === row) return;
+        var rect = row.getBoundingClientRect();
+        var after = e.clientY > rect.top + rect.height / 2;
+        list.insertBefore(dragging, after ? row.nextSibling : row);
+      });
+    });
   }
 
   function providerForm(p) {
@@ -861,6 +908,8 @@
         '<label class="field"><span>接口类型</span><select class="ctl" name="type">' + PROV_TYPES.map(function (t) { return '<option value="' + t + '">' + t + '</option>'; }).join("") + '</select></label></div>' : "") +
       '<label class="field"><span>服务地址</span><input class="ctl" name="base_url" type="url" required placeholder="https://api.openai.com/v1" value="' + esc(p.base_url || "") + '"></label>' +
       '<label class="field"><span>模型范围（可选）</span><input class="ctl" name="models" placeholder="gpt-4o, deepseek-chat" value="' + esc((p.models || []).join(", ")) + '"><span class="hint">逗号分隔；留空表示不限制。也可以在「模型」页逐个登记。</span></label>' +
+      '<label class="field"><span>上游请求头（可选）</span><textarea class="ctl" name="headers" rows="3" placeholder="X-Title: Harbor">' + esc(Object.keys(p.headers || {}).map(function (k) { return k + ": " + p.headers[k]; }).join("\n")) + '</textarea><span class="hint">每行 Key: Value；同名单头会覆盖默认值。</span></label>' +
+      '<label class="check"><input type="checkbox" name="pass_headers"' + (p.pass_headers ? " checked" : "") + '> 透传客户端请求头（排除 Authorization / Content-Type / Accept / Host）</label>' +
       (creating ? '<label class="field"><span>访问凭证（可选）</span><input class="ctl" name="credentials" type="password" autocomplete="new-password" placeholder="sk-... "><span class="hint">多个用逗号分隔，也可以稍后添加。</span></label>' : "") +
       '<div class="setting-form">' + limits.map(function (l) {
         return '<label class="field"><span>' + esc(l[1]) + '</span><input class="ctl" name="' + l[0] + '" type="number" min="0" step="1" value="' + esc(String(p[l[0]] || 0)) + '"></label>';
@@ -901,6 +950,14 @@
       if (!base) throw new Error("请填写服务地址");
       body.base_url = base;
       body.models = (form.querySelector('[name="models"]').value || "").split(/[,，\s]+/).filter(Boolean);
+      var headerLines = (form.querySelector('[name="headers"]').value || "").split(/\r?\n/);
+      var headers = {};
+      headerLines.forEach(function (line) {
+        var idx = line.indexOf(":");
+        if (idx > 0) headers[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
+      });
+      body.headers = headers;
+      body.pass_headers = !!(form.querySelector('[name="pass_headers"]') || {}).checked;
       ["concurrency", "rpm", "tpm", "tph", "tpd"].forEach(function (key) {
         var node = form.querySelector('[name="' + key + '"]');
         if (node) body[key] = Math.max(0, parseInt(node.value, 10) || 0);
@@ -978,7 +1035,7 @@
 
   async function loadModels() {
     var data = await api("/api/providers");
-    state.providers = (data.providers || []).slice().sort(function (a, b) { return a.name.localeCompare(b.name); });
+    state.providers = data.providers || [];
     var names = state.providers.map(function (p) { return p.name; });
     var wanted = state.models.provider || localStorage.getItem(PROV_KEY) || "";
     if (names.indexOf(wanted) < 0) wanted = names[0] || "";
@@ -1499,6 +1556,158 @@
     });
   });
 
+  /* ================= 网络代理 ================= */
+  async function loadProxy() {
+    var data = await api("/api/proxy");
+    state.proxy = {
+      mode: data.mode || "direct",
+      active: data.active || "",
+      nodes: data.nodes || [],
+      clash_url: data.clash_url || ""
+    };
+    renderProxy();
+  }
+
+  function proxyNodeRow(node) {
+    return '<tr><td><input type="radio" name="proxy-active" data-act="proxy.active" data-id="' + esc(node.id) + '"' + (state.proxy.active === node.id ? " checked" : "") + ' aria-label="设为当前代理"></td>' +
+      "<td>" + esc(node.name || node.id) + "</td>" +
+      '<td><span class="badge info">' + esc(String(node.type || "").toUpperCase()) + "</span></td>" +
+      '<td class="mono">' + esc(node.host + ":" + node.port) + "</td>" +
+      "<td>" + (node.username ? esc(node.username) : '<span class="muted">—</span>') + "</td>" +
+      '<td class="actions"><button type="button" class="icon-btn danger" data-act="proxy.remove" data-id="' + esc(node.id) + '" aria-label="删除节点">' + icon("trash-2") + "</button></td></tr>";
+  }
+
+  function renderProxy() {
+    var p = state.proxy;
+    var rows = p.nodes.map(proxyNodeRow).join("");
+    el.pages.proxy.innerHTML =
+      pageHead("HARBOR / NETWORK", "网络代理", "上游 LLM 请求的出站代理；支持 HTTP / SOCKS5，或从 Clash 订阅导入节点。",
+        '<button type="button" class="btn ghost" data-act="proxy.reload">' + icon("refresh") + "刷新</button>" +
+        '<button type="button" class="btn" data-act="proxy.save">' + icon("check") + "保存</button>") +
+      '<div class="settings"><section class="card"><div class="card-head"><div><h3>出站模式</h3><p>直连或使用选中的代理节点；保存后对后续上游请求立即生效。</p></div></div>' +
+      '<div class="card-body">' + seg("proxy.mode", p.mode, [["direct", "直连"], ["proxy", "使用代理"]]) + "</div></section>" +
+      '<section class="card"><div class="card-head"><div><h3>Clash 订阅</h3><p>粘贴 Clash 订阅链接，导入其中的 HTTP / SOCKS5 节点。</p></div></div><div class="card-body">' +
+      '<label class="field"><span>订阅链接</span><input class="ctl mono" id="proxy-clash-url" placeholder="https://example.com/clash.yaml" value="' + esc(p.clash_url) + '"></label>' +
+      '<div class="setting-foot"><button type="button" class="btn ghost" data-act="proxy.clash">' + icon("arrow-down") + "导入节点</button></div></div></section>" +
+      '<section class="card"><div class="card-head"><div><h3>代理节点</h3><p>选择当前节点；删除后记得保存。</p></div></div>' +
+      '<div class="table-wrap">' + (rows ? '<table class="table"><thead><tr><th></th><th>名称</th><th>类型</th><th>地址</th><th>用户名</th><th></th></tr></thead><tbody>' + rows + "</tbody></table>" :
+        emptyState("arrow-down", "还没有代理节点", "添加 HTTP / SOCKS5 节点，或从 Clash 订阅导入。")) + "</div>" +
+      '<div class="card-body"><form data-form="proxy.add"><div class="setting-form">' +
+      '<label class="field"><span>名称</span><input class="ctl" name="name" placeholder="例如 香港节点"></label>' +
+      '<label class="field"><span>类型</span><select class="ctl" name="type"><option value="http">HTTP</option><option value="socks5">SOCKS5</option></select></label>' +
+      '<label class="field"><span>主机</span><input class="ctl mono" name="host" placeholder="127.0.0.1" required></label>' +
+      '<label class="field"><span>端口</span><input class="ctl" name="port" type="number" min="1" max="65535" placeholder="7890" required></label>' +
+      '<label class="field"><span>用户名（可选）</span><input class="ctl" name="username" autocomplete="off"></label>' +
+      '<label class="field"><span>密码（可选）</span><input class="ctl" name="password" type="password" autocomplete="new-password"></label>' +
+      '</div><div class="setting-foot"><button type="submit" class="btn ghost">' + icon("plus") + "添加节点</button></div></form></div></section></div>";
+  }
+
+  actions["proxy.reload"] = function (btn) {
+    busy(btn, async function () { await loadProxy(); });
+  };
+
+  actions["proxy.active"] = function (node) {
+    state.proxy.active = node.getAttribute("data-id");
+  };
+
+  actions["proxy.remove"] = function (btn) {
+    var id = btn.getAttribute("data-id");
+    state.proxy.nodes = state.proxy.nodes.filter(function (n) { return n.id !== id; });
+    if (state.proxy.active === id) state.proxy.active = "";
+    renderProxy();
+  };
+
+  actions["proxy.clash"] = function (btn) {
+    var input = $("#proxy-clash-url");
+    var url = input ? input.value.trim() : "";
+    if (!url) { toast("请填写 Clash 订阅链接", true); return; }
+    state.proxy.clash_url = url;
+    busy(btn, async function () {
+      var data = await api("/api/proxy/clash", { method: "POST", body: JSON.stringify({ url: url }) });
+      var byID = {};
+      state.proxy.nodes.forEach(function (n) { byID[n.id] = n; });
+      (data.nodes || []).forEach(function (n) { byID[n.id] = n; });
+      state.proxy.nodes = Object.keys(byID).map(function (id) { return byID[id]; });
+      if (!state.proxy.active && state.proxy.nodes.length) state.proxy.active = state.proxy.nodes[0].id;
+      renderProxy();
+      toast("已导入 " + (data.nodes || []).length + " 个节点，保存后生效");
+    });
+  };
+
+  actions["proxy.save"] = function (btn) {
+    busy(btn, async function () {
+      var data = await api("/api/proxy", { method: "PUT", body: JSON.stringify(state.proxy) });
+      state.proxy = { mode: data.mode || "direct", active: data.active || "", nodes: data.nodes || [], clash_url: data.clash_url || "" };
+      renderProxy();
+      toast("代理设置已保存");
+    });
+  };
+
+  forms["proxy.add"] = function (form) {
+    var name = form.querySelector('[name="name"]').value.trim();
+    var type = form.querySelector('[name="type"]').value;
+    var host = form.querySelector('[name="host"]').value.trim();
+    var port = parseInt(form.querySelector('[name="port"]').value, 10) || 0;
+    if (!host || port < 1 || port > 65535) { toast("请填写有效的主机与端口", true); return; }
+    state.proxy.nodes.push({
+      id: "n-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
+      name: name || (host + ":" + port), type: type, host: host, port: port,
+      username: form.querySelector('[name="username"]').value.trim(),
+      password: form.querySelector('[name="password"]').value
+    });
+    if (!state.proxy.active) state.proxy.active = state.proxy.nodes[state.proxy.nodes.length - 1].id;
+    renderProxy();
+    toast("节点已添加，保存后生效");
+  };
+
+  changes["proxy.mode"] = function (node) {
+    state.proxy.mode = node.value;
+  };
+
+  /* ================= 日志 ================= */
+  async function loadLogs() {
+    var qs = new URLSearchParams({ limit: "300" });
+    if (state.logs.level) qs.set("level", state.logs.level);
+    var data = await api("/api/logs?" + qs.toString());
+    state.logs.rows = data.logs || [];
+    renderLogs();
+  }
+
+  function logLevelBadge(level) {
+    var l = String(level || "").toLowerCase();
+    var cls = l === "error" ? "err" : (l === "warn" ? "warn" : (l === "debug" ? "" : "info"));
+    return '<span class="badge ' + cls + '">' + esc(l.toUpperCase() || "LOG") + "</span>";
+  }
+
+  function renderLogs() {
+    var rows = state.logs.rows.map(function (item) {
+      var attrs = item.attrs ? JSON.stringify(item.attrs) : "";
+      return "<tr><td class=\"log-time\">" + esc(fmtTime(item.time)) + "</td>" +
+        "<td>" + logLevelBadge(item.level) + "</td>" +
+        "<td>" + esc(item.message || "") + "</td>" +
+        '<td class="mono log-attrs" title="' + esc(attrs) + '">' + esc(attrs || "—") + "</td></tr>";
+    }).join("");
+    el.pages.logs.innerHTML =
+      pageHead("HARBOR / LOGS", "日志", "进程内最近 2000 条系统日志；用于排障，不替代外部日志采集。",
+        '<button type="button" class="btn ghost" data-act="logs.reload">' + icon("refresh") + "刷新</button>") +
+      '<section class="card"><div class="toolbar">' +
+      seg("logs.level", state.logs.level, [["", "全部"], ["debug", "DEBUG"], ["info", "INFO"], ["warn", "WARN"], ["error", "ERROR"]]) +
+      '<span class="hint">' + num(state.logs.rows.length) + " 条</span>" +
+      "</div><div class=\"table-wrap\">" + (rows ?
+        '<table class="table dense log-table"><colgroup><col><col><col><col></colgroup><thead><tr><th>时间</th><th>级别</th><th>消息</th><th>字段</th></tr></thead><tbody>' + rows + "</tbody></table>" :
+        emptyState("file", "还没有日志", "服务运行后会在这里显示系统日志。")) +
+      "</div></section>";
+  }
+
+  actions["logs.reload"] = function (btn) {
+    busy(btn, async function () { await loadLogs(); });
+  };
+
+  changes["logs.level"] = function (node) {
+    state.logs.level = node.value;
+    loadLogs().catch(function (e) { toast(e.message, true); });
+  };
+
   /* ================= 设置 ================= */
   async function loadSettings() {
     state.settings = await api("/api/settings");
@@ -1514,7 +1723,8 @@
   var SETTING_GROUPS = [
     ["queue", "排队", "队列容量与等待上限；保存后对后续请求立即生效。"],
     ["limits", "超时与重试", "请求总超时、上游尝试次数与退避/冷却。"],
-    ["keepalive", "心跳保活", "SSE / 流式响应静默时补空事件；WebSocket 不在本网关范围。"]
+    ["keepalive", "心跳保活", "SSE / 流式响应静默时补空事件；WebSocket 不在本网关范围。"],
+    ["admin", "管理后台", "入口路径可自定义；保存后旧路径立即失效，当前页面会跳转到新入口。"]
   ];
 
   function settingInput(f) {
@@ -1617,7 +1827,13 @@
       else payload[key] = v;
     });
     var data = await api("/api/settings", { method: "PUT", body: JSON.stringify(payload) });
-    state.settings = Object.assign({}, state.settings, { fields: data.fields, keepalive: data.keepalive });
+    var previousPath = state.settings && state.settings.admin_path;
+    state.settings = Object.assign({}, state.settings, { fields: data.fields, keepalive: data.keepalive, admin_path: data.admin_path });
+    if (data.admin_path && data.admin_path !== previousPath) {
+      toast("入口已改为 " + data.admin_path + "，正在跳转");
+      setTimeout(function () { location.href = data.admin_path + "/"; }, 500);
+      return;
+    }
     renderSettings();
     toast("设置已保存并生效");
   }
@@ -1651,6 +1867,8 @@
       keys: loadKeys,
       providers: loadProviders,
       models: loadModels,
+      proxy: loadProxy,
+      logs: loadLogs,
       settings: loadSettings
     }[tab];
     if (!run) return;
@@ -1706,6 +1924,10 @@
         var active = document.activeElement;
         if (active && active.id === "req-q") return;
         loadRequests().catch(function (e) { toast(e.message, true); });
+        return;
+      }
+      if (state.tab === "logs") {
+        loadLogs().catch(function (e) { toast(e.message, true); });
         return;
       }
       if (state.tab === "overview" || state.tab === "queue") loadTab(state.tab);

@@ -21,16 +21,33 @@ var adminJS []byte
 var landingJS []byte
 
 // registerUI 注册前端页面：
-//   - GET /         → 公开落地页（index.html）
-//   - GET /admin     → 管理台（admin.html），静态资源 /admin.css /admin.js 同源离线
-//   - GET /admin.css → 管理台样式
-//   - GET /admin.js  → 管理台脚本（登录先请求 /api/stats 校验 token）
+//   - GET /           → 公开落地页（index.html）
+//   - GET /{admin}/   → 管理台（路径可在设置页热改，页面内资源相对同路径）
+//   - GET /landing.js → 落地页脚本
 func (s *Server) registerUI(mux *http.ServeMux) {
 	mux.HandleFunc("GET /{$}", s.handleIndexPage)
-	mux.HandleFunc("GET /admin", s.handleAdminPage)
-	mux.HandleFunc("GET /admin.css", s.handleAdminCSS)
-	mux.HandleFunc("GET /admin.js", s.handleAdminJS)
 	mux.HandleFunc("GET /landing.js", s.handleLandingJS)
+	// 管理台入口不固定：由 handleDynamicUI 按当前 adminPath 分发。
+	mux.HandleFunc("GET /{path...}", s.handleDynamicUI)
+}
+
+// handleDynamicUI 处理落地页以外的 GET：
+// 只有当前管理台路径及其相对资源可见，旧路径立即 404。
+func (s *Server) handleDynamicUI(w http.ResponseWriter, r *http.Request) {
+	admin := s.AdminPath()
+	path := r.URL.Path
+	switch path {
+	case admin:
+		http.Redirect(w, r, admin+"/", http.StatusTemporaryRedirect)
+	case admin + "/":
+		s.handleAdminPage(w, r)
+	case admin + "/admin.css":
+		s.handleAdminCSS(w, r)
+	case admin + "/admin.js":
+		s.handleAdminJS(w, r)
+	default:
+		http.NotFound(w, r)
+	}
 }
 
 func (s *Server) handleIndexPage(w http.ResponseWriter, r *http.Request) {

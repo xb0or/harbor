@@ -89,7 +89,7 @@ log:
                     if server.poll() is not None:
                         raise RuntimeError((temp / "server.log").read_text())
                     try:
-                        urlopen(base + "/admin", timeout=.5).close()
+                        urlopen(base + "/harbor-console", timeout=.5).close()
                         break
                     except OSError:
                         time.sleep(.1)
@@ -108,7 +108,7 @@ log:
                         if (ms === 5000) window.testPoll = fn;
                         return originalInterval(fn, ms, ...args);
                       };""")
-                    page.goto(base + "/admin#/queue")
+                    page.goto(base + "/harbor-console#/queue")
                     page.locator("#token-input").fill("wrong-token")
                     page.locator("#login-btn").click()
                     expect(page.locator("#app")).to_be_hidden()

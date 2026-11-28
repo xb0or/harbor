@@ -133,6 +133,9 @@ func (d *DB) Migrate() error {
 			tpm           INTEGER NOT NULL DEFAULT 0,
 			tph           INTEGER NOT NULL DEFAULT 0,
 			tpd           INTEGER NOT NULL DEFAULT 0,
+			sort_order    INTEGER NOT NULL DEFAULT 0,
+			headers       TEXT NOT NULL DEFAULT '{}',
+			pass_headers  INTEGER NOT NULL DEFAULT 0,
 			created_at    DATETIME NOT NULL
 		)`,
 		`CREATE TABLE IF NOT EXISTS routes (
@@ -162,6 +165,10 @@ func (d *DB) Migrate() error {
 	// 旧版 api_keys 没有 secret_encrypted：新增加密密文列，用于恢复管理台创建的 Key。
 	if err := d.migrateApiKeysSecret(); err != nil {
 		return fmt.Errorf("migrate api_keys secret: %w", err)
+	}
+	// Provider 排序、上游请求头与透传开关。
+	if err := d.migrateProvidersMeta(); err != nil {
+		return fmt.Errorf("migrate providers meta: %w", err)
 	}
 	// 旧版 routes 存储 []string 格式（简单 provider 名列表），新版存 []ModelMapping。
 	// 只有检测到旧格式时才重建；当前格式必须保留，避免重启丢失管理台映射。
@@ -1104,6 +1111,31 @@ func (d *DB) ListCredentials() ([]*Credential, error) {
 
 // --- providers ---
 
+// migrateProvidersMeta 补齐 Provider 排序、上游请求头与透传开关。
+func (d *DB) migrateProvidersMeta() error {
+	columns, err := tableColumns(d.sql, "providers")
+	if err != nil {
+		return err
+	}
+	adds := []struct {
+		name string
+		def  string
+	}{
+		{"sort_order", "INTEGER NOT NULL DEFAULT 0"},
+		{"headers", "TEXT NOT NULL DEFAULT '{}'"},
+		{"pass_headers", "INTEGER NOT NULL DEFAULT 0"},
+	}
+	for _, add := range adds {
+		if columns[add.name] {
+			continue
+		}
+		if _, err := d.sql.Exec(`ALTER TABLE providers ADD COLUMN ` + add.name + ` ` + add.def); err != nil {
+			return fmt.Errorf("migrate providers meta (%s): %w", add.name, err)
+		}
+	}
+	return nil
+}
+
 // ModelSpec 是 providers.models 列里的模型声明（与 provider.ModelSpec 的 JSON 兼容）。
 type ModelSpec struct {
 	ID           string   `json:"id"`
@@ -1129,6 +1161,9 @@ type ProviderRow struct {
 	TPM         int64
 	TPH         int64
 	TPD         int64
+	SortOrder   int
+	Headers     map[string]string
+	PassHeaders bool
 	CreatedAt   time.Time
 }
 
@@ -1149,17 +1184,27 @@ func (d *DB) UpsertProvider(p *ProviderRow) error {
 	if err != nil {
 		return fmt.Errorf("marshal models: %w", err)
 	}
+	headers := p.Headers
+	if headers == nil {
+		headers = map[string]string{}
+	}
+	headerJSON, err := json.Marshal(headers)
+	if err != nil {
+		return fmt.Errorf("marshal headers: %w", err)
+	}
 	_, err = d.sql.Exec(`
 		INSERT INTO providers (id, name, type, base_url, models, timeout, cooldown,
-			concurrency, rpm, tpm, tph, tpd, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			concurrency, rpm, tpm, tph, tpd, sort_order, headers, pass_headers, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(name) DO UPDATE SET
 			id=excluded.id, type=excluded.type, base_url=excluded.base_url,
 			models=excluded.models, timeout=excluded.timeout, cooldown=excluded.cooldown,
 			concurrency=excluded.concurrency, rpm=excluded.rpm,
-			tpm=excluded.tpm, tph=excluded.tph, tpd=excluded.tpd`,
+			tpm=excluded.tpm, tph=excluded.tph, tpd=excluded.tpd,
+			sort_order=excluded.sort_order, headers=excluded.headers,
+			pass_headers=excluded.pass_headers`,
 		p.ID, p.Name, p.Type, p.BaseURL, string(models), p.Timeout, p.Cooldown,
-		p.Concurrency, p.RPM, p.TPM, p.TPH, p.TPD, p.CreatedAt,
+		p.Concurrency, p.RPM, p.TPM, p.TPH, p.TPD, p.SortOrder, string(headerJSON), boolInt(p.PassHeaders), p.CreatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert provider: %w", err)
@@ -1171,8 +1216,8 @@ func (d *DB) UpsertProvider(p *ProviderRow) error {
 func (d *DB) ListProviders() ([]*ProviderRow, error) {
 	rows, err := d.sql.Query(`
 		SELECT id, name, type, base_url, models, timeout, cooldown,
-			concurrency, rpm, tpm, tph, tpd, created_at
-		FROM providers ORDER BY created_at`)
+			concurrency, rpm, tpm, tph, tpd, sort_order, headers, pass_headers, created_at
+		FROM providers ORDER BY sort_order, created_at`)
 	if err != nil {
 		return nil, fmt.Errorf("list providers: %w", err)
 	}
@@ -1180,22 +1225,43 @@ func (d *DB) ListProviders() ([]*ProviderRow, error) {
 	var out []*ProviderRow
 	for rows.Next() {
 		var (
-			p       ProviderRow
-			models  string
-			timeout sql.NullString
-			cool    sql.NullString
+			p        ProviderRow
+			models   string
+			timeout  sql.NullString
+			cool     sql.NullString
+			headers  sql.NullString
+			passFlag int
 		)
 		if err := rows.Scan(&p.ID, &p.Name, &p.Type, &p.BaseURL, &models,
 			&timeout, &cool, &p.Concurrency, &p.RPM,
-			&p.TPM, &p.TPH, &p.TPD, &p.CreatedAt); err != nil {
+			&p.TPM, &p.TPH, &p.TPD, &p.SortOrder, &headers, &passFlag, &p.CreatedAt); err != nil {
 			return nil, err
 		}
 		p.ModelSpecs, p.Models = parseProviderModels(models)
 		p.Timeout = timeout.String
 		p.Cooldown = cool.String
+		p.PassHeaders = passFlag != 0
+		if headers.Valid && strings.TrimSpace(headers.String) != "" {
+			_ = json.Unmarshal([]byte(headers.String), &p.Headers)
+		}
 		out = append(out, &p)
 	}
 	return out, rows.Err()
+}
+
+// SetProviderOrder 按给定名称顺序写入 sort_order；未列出的 Provider 排在后面。
+func (d *DB) SetProviderOrder(names []string) error {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for i, name := range names {
+		if _, err := tx.Exec(`UPDATE providers SET sort_order = ? WHERE name = ?`, i, name); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // parseProviderModels 解析 models 列，兼容旧格式 ["a","b"] 与新格式 [{"id":"a","enabled":false}]。

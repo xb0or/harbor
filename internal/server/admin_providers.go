@@ -3,6 +3,7 @@ package server
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -20,18 +21,20 @@ func (s *Server) handleListProviders(w http.ResponseWriter, r *http.Request) {
 		CooldownUntil string `json:"cooldown_until,omitempty"`
 	}
 	type provView struct {
-		Name        string     `json:"name"`
-		Type        string     `json:"type"`
-		BaseURL     string     `json:"base_url"`
-		Models      []string   `json:"models"`
-		Concurrency int        `json:"concurrency"`
-		RPM         int        `json:"rpm"`
-		TPM         int64      `json:"tpm"`
-		TPH         int64      `json:"tph"`
-		TPD         int64      `json:"tpd"`
-		Available   bool       `json:"available"`
-		NextRecover string     `json:"next_recover,omitempty"`
-		Credentials []credView `json:"credentials"`
+		Name        string            `json:"name"`
+		Type        string            `json:"type"`
+		BaseURL     string            `json:"base_url"`
+		Models      []string          `json:"models"`
+		Concurrency int               `json:"concurrency"`
+		RPM         int               `json:"rpm"`
+		TPM         int64             `json:"tpm"`
+		TPH         int64             `json:"tph"`
+		TPD         int64             `json:"tpd"`
+		Headers     map[string]string `json:"headers,omitempty"`
+		PassHeaders bool              `json:"pass_headers"`
+		Available   bool              `json:"available"`
+		NextRecover string            `json:"next_recover,omitempty"`
+		Credentials []credView        `json:"credentials"`
 	}
 	out := make([]provView, 0, len(s.mgr.Providers()))
 	for _, p := range s.mgr.Providers() {
@@ -40,6 +43,7 @@ func (s *Server) handleListProviders(w http.ResponseWriter, r *http.Request) {
 			Name: view.Name, Type: view.Type, BaseURL: view.BaseURL,
 			Models: view.Models, Concurrency: view.Concurrency, RPM: view.RPM,
 			TPM: view.TPM, TPH: view.TPH, TPD: view.TPD,
+			Headers: view.Headers, PassHeaders: view.PassHeaders,
 			Available: p.Available(),
 		}
 		v.NextRecover = p.NextRecover().Format(time.RFC3339)
@@ -53,16 +57,18 @@ func (s *Server) handleListProviders(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCreateProvider(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name        string   `json:"name"`
-		Type        string   `json:"type"`
-		BaseURL     string   `json:"base_url"`
-		Models      []string `json:"models"`
-		Credentials []string `json:"credentials"`
-		Concurrency int      `json:"concurrency"`
-		RPM         int      `json:"rpm"`
-		TPM         int64    `json:"tpm"`
-		TPH         int64    `json:"tph"`
-		TPD         int64    `json:"tpd"`
+		Name        string            `json:"name"`
+		Type        string            `json:"type"`
+		BaseURL     string            `json:"base_url"`
+		Models      []string          `json:"models"`
+		Credentials []string          `json:"credentials"`
+		Concurrency int               `json:"concurrency"`
+		RPM         int               `json:"rpm"`
+		TPM         int64             `json:"tpm"`
+		TPH         int64             `json:"tph"`
+		TPD         int64             `json:"tpd"`
+		Headers     map[string]string `json:"headers"`
+		PassHeaders bool              `json:"pass_headers"`
 	}
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
 	if err := dec.Decode(&req); err != nil {
@@ -77,6 +83,10 @@ func (s *Server) handleCreateProvider(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, s.newRequestID(), invalidRequestErr(err.Error()))
 		return
 	}
+	if err := validateUpstreamHeaders(req.Headers); err != nil {
+		s.writeError(w, s.newRequestID(), invalidRequestErr(err.Error()))
+		return
+	}
 	if _, exists := s.mgr.Get(req.Name); exists {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "provider already exists"})
 		return
@@ -86,6 +96,7 @@ func (s *Server) handleCreateProvider(w http.ResponseWriter, r *http.Request) {
 		req.Concurrency, req.RPM, req.TPM, req.TPH, req.TPD)
 	// 管理台创建的上游走连接层 SSRF 防护（只连公网地址）。
 	p.SetPublicOnly(true)
+	p.UpdateHeaders(req.Headers, req.PassHeaders)
 	s.mgr.AddProvider(p)
 	s.persistProvider(p)
 	for _, c := range p.Credentials() {
@@ -102,13 +113,15 @@ func (s *Server) handleUpdateProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		BaseURL     *string  `json:"base_url"`
-		Models      []string `json:"models"`
-		Concurrency *int     `json:"concurrency"`
-		RPM         *int     `json:"rpm"`
-		TPM         *int64   `json:"tpm"`
-		TPH         *int64   `json:"tph"`
-		TPD         *int64   `json:"tpd"`
+		BaseURL     *string           `json:"base_url"`
+		Models      []string          `json:"models"`
+		Concurrency *int              `json:"concurrency"`
+		RPM         *int              `json:"rpm"`
+		TPM         *int64            `json:"tpm"`
+		TPH         *int64            `json:"tph"`
+		TPD         *int64            `json:"tpd"`
+		Headers     map[string]string `json:"headers"`
+		PassHeaders *bool             `json:"pass_headers"`
 	}
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
 	if err := dec.Decode(&req); err != nil {
@@ -125,6 +138,20 @@ func (s *Server) handleUpdateProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Models != nil {
 		p.UpdateModels(req.Models)
+	}
+	if req.Headers != nil || req.PassHeaders != nil {
+		if err := validateUpstreamHeaders(req.Headers); err != nil {
+			s.writeError(w, s.newRequestID(), invalidRequestErr(err.Error()))
+			return
+		}
+		headers, pass := p.HeaderConfig()
+		if req.Headers != nil {
+			headers = req.Headers
+		}
+		if req.PassHeaders != nil {
+			pass = *req.PassHeaders
+		}
+		p.UpdateHeaders(headers, pass)
 	}
 	lim := p.Limits()
 	if req.Concurrency != nil {
@@ -227,6 +254,58 @@ func (s *Server) handleRemoveCredential(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"id": credID, "deleted": true})
+}
+
+// validateUpstreamHeaders 校验自定义上游请求头，阻止换行注入与危险头。
+func validateUpstreamHeaders(headers map[string]string) error {
+	if len(headers) > 32 {
+		return fmt.Errorf("自定义请求头最多 32 个")
+	}
+	blocked := map[string]bool{
+		"host": true, "content-length": true, "connection": true,
+		"transfer-encoding": true, "upgrade": true, "proxy-authorization": true,
+	}
+	for name, value := range headers {
+		name = strings.TrimSpace(name)
+		if name == "" || len(name) > 128 {
+			return fmt.Errorf("请求头名称无效")
+		}
+		if blocked[strings.ToLower(name)] {
+			return fmt.Errorf("请求头 %s 不允许自定义", name)
+		}
+		for _, r := range name {
+			valid := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') ||
+				strings.ContainsRune("!#$%&'*+-.^_`|~", r)
+			if !valid {
+				return fmt.Errorf("请求头名称 %q 含非法字符", name)
+			}
+		}
+		if len(value) > 4096 || strings.ContainsAny(value, "\r\n") {
+			return fmt.Errorf("请求头 %s 的值非法", name)
+		}
+	}
+	return nil
+}
+
+func (s *Server) handleReorderProviders(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Names []string `json:"names"`
+	}
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	if err := dec.Decode(&req); err != nil {
+		s.writeError(w, s.newRequestID(), invalidRequestErr(err.Error()))
+		return
+	}
+	if !s.mgr.ReorderProviders(req.Names) {
+		s.writeError(w, s.newRequestID(), invalidRequestErr("names 必须覆盖全部现有上游"))
+		return
+	}
+	if s.store != nil {
+		if err := s.store.SetProviderOrder(req.Names); err != nil {
+			s.log.Warn("persist provider order failed", "err", err.Error())
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"names": req.Names, "reordered": true})
 }
 
 func (s *Server) handleProbeModels(w http.ResponseWriter, r *http.Request) {

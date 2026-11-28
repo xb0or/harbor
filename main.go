@@ -22,6 +22,7 @@ import (
 	"harbor/internal/db"
 	"harbor/internal/executor"
 	"harbor/internal/key"
+	"harbor/internal/logbuf"
 	"harbor/internal/provider"
 	"harbor/internal/queue"
 	"harbor/internal/server"
@@ -45,7 +46,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	logger := newLogger(cfg)
+	logger := slog.New(logbuf.NewHandler(newLogger(cfg).Handler()))
 
 	keyStore := key.NewStore()
 	var mgr *provider.Manager

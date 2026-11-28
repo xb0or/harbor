@@ -79,6 +79,7 @@ func RestoreStartup(store *db.DB, keyStore *key.Store, mgr *provider.Manager, ti
 			p = provider.New(row.Name, row.Type, row.BaseURL, row.Models, nil, pt, pc,
 				row.Concurrency, row.RPM, row.TPM, row.TPH, row.TPD)
 			applyProviderSpecs(p, row)
+			p.UpdateHeaders(row.Headers, row.PassHeaders)
 			mgr.AddProvider(p)
 			continue
 		}
@@ -89,6 +90,7 @@ func RestoreStartup(store *db.DB, keyStore *key.Store, mgr *provider.Manager, ti
 		applyProviderSpecs(p, row)
 		p.UpdateTimeoutCooldown(pt, pc)
 		p.UpdateLimits(row.Concurrency, row.RPM, row.TPM, row.TPH, row.TPD)
+		p.UpdateHeaders(row.Headers, row.PassHeaders)
 	}
 
 	persistedCredentials, err := store.ListCredentials()
@@ -188,7 +190,7 @@ func MirrorStartup(store *db.DB, keyStore *key.Store, providers []*provider.Prov
 			log.Warn("mirror key failed", "id", k.ID, "err", err.Error())
 		}
 	}
-	for _, p := range providers {
+	for i, p := range providers {
 		view := p.Snapshot()
 		// 镜像 Provider 元数据到 providers 表
 		if err := store.UpsertProvider(&db.ProviderRow{
@@ -199,6 +201,7 @@ func MirrorStartup(store *db.DB, keyStore *key.Store, providers []*provider.Prov
 			Cooldown:    view.Cooldown.String(),
 			Concurrency: view.Concurrency, RPM: view.RPM,
 			TPM: view.TPM, TPH: view.TPH, TPD: view.TPD,
+			SortOrder: i, Headers: view.Headers, PassHeaders: view.PassHeaders,
 			CreatedAt: time.Now(),
 		}); err != nil {
 			log.Warn("mirror provider failed", "name", view.Name, "err", err.Error())
@@ -307,6 +310,7 @@ func SeedEmptyFromConfig(store *db.DB, cfg *config.Config, keyStore *key.Store, 
 				timeout, cooldown,
 				pc.Concurrency, pc.RPM, pc.TPM, pc.TPH, pc.TPD,
 			)
+			p.UpdateHeaders(pc.Headers, pc.PassHeaders)
 			mgr.AddProvider(p)
 			if err := persistSeedProvider(store, p, encKey, log); err != nil {
 				log.Warn("seed provider failed", "name", pc.Name, "err", err.Error())
@@ -364,6 +368,7 @@ func persistSeedProvider(store *db.DB, p *provider.Provider, encKey []byte, log 
 		Cooldown:    view.Cooldown.String(),
 		Concurrency: view.Concurrency, RPM: view.RPM,
 		TPM: view.TPM, TPH: view.TPH, TPD: view.TPD,
+		Headers: view.Headers, PassHeaders: view.PassHeaders,
 		CreatedAt: time.Now(),
 	}); err != nil {
 		return err
@@ -448,6 +453,7 @@ func LoadYAMLRuntime(cfg *config.Config, keyStore *key.Store, log *slog.Logger) 
 			timeout, cooldown,
 			pc.Concurrency, pc.RPM, pc.TPM, pc.TPH, pc.TPD,
 		)
+		p.UpdateHeaders(pc.Headers, pc.PassHeaders)
 		providers = append(providers, p)
 		log.Info("provider loaded",
 			"name", pc.Name, "type", pc.Type, "base_url", pc.BaseURL, "credentials", len(pc.Credentials))

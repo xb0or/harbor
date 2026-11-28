@@ -130,6 +130,10 @@ type ProviderConfig struct {
 	TPM         int64 `yaml:"tpm"`
 	TPH         int64 `yaml:"tph"`
 	TPD         int64 `yaml:"tpd"`
+	// Headers 是发往该上游的自定义请求头（同名单头覆盖默认值）。
+	Headers map[string]string `yaml:"headers"`
+	// PassHeaders 为 true 时透传客户端请求头（排除鉴权/内容类型等敏感头）。
+	PassHeaders bool `yaml:"pass_headers"`
 }
 
 // Route 模型映射：统一模型名 -> 可用 providers 列表（按顺序优先）。
@@ -167,6 +171,56 @@ type RetryLimitsConfig struct {
 
 type AdminConfig struct {
 	Token string `yaml:"token"` // 管理接口 Bearer Token，空则关闭管理接口
+	// Path 是管理台入口路径。默认 /harbor-console，必须显式避开 /admin、
+	// /api、/v1 等常见或已占用路径；可在管理台设置页热改。
+	Path string `yaml:"path"`
+}
+
+// PathValue 返回规范化后的管理台入口路径。
+func (a AdminConfig) PathValue() string {
+	path, err := NormalizeAdminPath(a.Path)
+	if err != nil {
+		return "/harbor-console"
+	}
+	return path
+}
+
+// NormalizeAdminPath 校验并规范化管理台入口路径。
+func NormalizeAdminPath(raw string) (string, error) {
+	path := strings.TrimSpace(raw)
+	if path == "" {
+		return "/harbor-console", nil
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	path = strings.TrimRight(path, "/")
+	if path == "" {
+		return "", fmt.Errorf("admin.path must not be root")
+	}
+	if len(path) > 128 {
+		return "", fmt.Errorf("admin.path too long: %d characters (maximum 128)", len(path))
+	}
+	if strings.Contains(path, "//") {
+		return "", fmt.Errorf("admin.path must not contain empty segments")
+	}
+	for _, seg := range strings.Split(strings.TrimPrefix(path, "/"), "/") {
+		if seg == "" || seg == "." || seg == ".." {
+			return "", fmt.Errorf("admin.path contains invalid segment %q", seg)
+		}
+		for _, r := range seg {
+			if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.') {
+				return "", fmt.Errorf("admin.path may only contain letters, digits, '.', '-' and '_'")
+			}
+		}
+	}
+	lower := strings.ToLower(path)
+	for _, reserved := range []string{"/admin", "/api", "/v1", "/landing.js"} {
+		if lower == reserved || strings.HasPrefix(lower, reserved+"/") {
+			return "", fmt.Errorf("admin.path must not use reserved prefix %q", reserved)
+		}
+	}
+	return path, nil
 }
 
 type LogConfig struct {
@@ -352,6 +406,11 @@ func (c *Config) validate() error {
 	if c.Queue.MaxDepth <= 0 {
 		c.Queue.MaxDepth = 200
 	}
+	if c.Admin.Path != "" {
+		if _, err := NormalizeAdminPath(c.Admin.Path); err != nil {
+			return fmt.Errorf("admin.path invalid: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -471,6 +530,7 @@ func (c *Config) applyDefaults() {
 	if c.Server.MaxHeaderBytes <= 0 {
 		c.Server.MaxHeaderBytes = 1 << 20
 	}
+	c.Admin.Path = c.Admin.PathValue()
 }
 
 func parseDur(s string, def time.Duration) time.Duration {

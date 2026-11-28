@@ -229,7 +229,7 @@ footer.site .right a:hover{color:var(--aqua)}
       <a href="#convergence">错误收敛</a>
       <a href="#features">特性</a>
       <a href="#integrate">接入</a>
-      <a href="/admin" class="btn-cta">管理台</a>
+      <a href="https://github.com/xb0or/harbor" target="_blank" rel="noopener" class="btn-cta">GitHub</a>
     </div>
   </div>
 </nav>
@@ -245,7 +245,7 @@ footer.site .right a:hover{color:var(--aqua)}
     <p class="sub">一个自用的 <b>AI 请求排队</b>与<b>错误收敛</b>网关。额度不足、并发打满或上游暂时不可用时，请求进入队列等待——而不是把可以稍后完成的请求直接变成 429。</p>
     <div class="cta-row">
       <a href="#integrate" class="btn-lg primary">开始接入 →</a>
-      <a href="/admin" class="btn-lg ghost">进入管理台</a>
+      <a href="https://github.com/xb0or/harbor" target="_blank" rel="noopener" class="btn-lg ghost">GitHub 仓库</a>
     </div>
   </div>
   <div class="scroll-hint">
@@ -438,7 +438,7 @@ footer.site .right a:hover{color:var(--aqua)}
 
 client = OpenAI(
     base_url=<span class="s">"http://127.0.0.1:8080/v1"</span>,
-    api_key=<span class="s">"hr-你的HarborKey"</span>,  <span class="c"># 管理台创建</span>
+    api_key=<span class="s">"hr-你的HarborKey"</span>,  <span class="c"># 在 Harbor 中创建</span>
 )
 
 <span class="c"># 3. 像往常一样调用——超限自动排队，不是 429</span>
@@ -500,7 +500,7 @@ resp = client.chat.completions.create(
       <span class="meta"><b>Harbor</b> · 一个不急着报 429 的 AI 网关</span>
     </div>
     <div class="right">
-      <a href="/admin">管理台</a>
+      <a href="https://github.com/xb0or/harbor" target="_blank" rel="noopener">GitHub</a>
       <a href="#philosophy">理念</a>
       <a href="#integrate">接入</a>
     </div>

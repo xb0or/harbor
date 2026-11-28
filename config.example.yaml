@@ -77,6 +77,7 @@ keys:
 
 admin:
   token: ""              # 管理接口 Bearer Token，留空则管理接口关闭
+  path: /harbor-console   # 管理台入口；不能用 /admin、/api、/v1，可在设置页热改
 
 storage:
   # SQLite 持久化（P2）。db_path 留空/整段删除 = 纯内存模式（P0 行为）。

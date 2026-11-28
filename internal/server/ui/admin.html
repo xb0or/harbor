@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Harbor · 管理台</title>
-<link rel="stylesheet" href="/admin.css">
+<link rel="stylesheet" href="admin.css">
 </head>
 <body>
 <svg class="sprite" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
@@ -129,10 +129,13 @@ SOFTWARE.
       <button type="button" data-tab="keys"><svg class="ico" aria-hidden="true"><use href="#i-key"></use></svg>密钥</button>
       <button type="button" data-tab="providers"><svg class="ico" aria-hidden="true"><use href="#i-server"></use></svg>上游</button>
       <button type="button" data-tab="models"><svg class="ico" aria-hidden="true"><use href="#i-layers-3"></use></svg>模型</button>
+      <button type="button" data-tab="proxy"><svg class="ico" aria-hidden="true"><use href="#i-arrow-down"></use></svg>网络</button>
+      <button type="button" data-tab="logs"><svg class="ico" aria-hidden="true"><use href="#i-file"></use></svg>日志</button>
       <button type="button" data-tab="settings"><svg class="ico" aria-hidden="true"><use href="#i-sliders-horizontal"></use></svg>设置</button>
     </nav>
     <div class="rail-foot">
       <a href="/"><svg class="ico" aria-hidden="true"><use href="#i-home"></use></svg>首页</a>
+      <a href="https://github.com/xb0or/harbor" target="_blank" rel="noopener"><svg class="ico" aria-hidden="true"><use href="#i-arrow-up-right"></use></svg>GitHub</a>
       <button type="button" id="logout"><svg class="ico" aria-hidden="true"><use href="#i-out"></use></svg>退出</button>
     </div>
   </aside>
@@ -152,6 +155,8 @@ SOFTWARE.
       <section class="page" id="tab-keys" hidden></section>
       <section class="page" id="tab-providers" hidden></section>
       <section class="page" id="tab-models" hidden></section>
+      <section class="page" id="tab-proxy" hidden></section>
+      <section class="page" id="tab-logs" hidden></section>
       <section class="page" id="tab-settings" hidden></section>
     </main>
   </div>
@@ -170,6 +175,6 @@ SOFTWARE.
 
 <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 
-<script src="/admin.js"></script>
+<script src="admin.js"></script>
 </body>
 </html>
