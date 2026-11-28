@@ -1088,6 +1088,8 @@ type ModelSpec struct {
 	Visible      *bool    `json:"visible,omitempty"`
 	Context      int      `json:"context,omitempty"`
 	Capabilities []string `json:"capabilities,omitempty"`
+	// ConcurrencyCost 是该上游模型每次请求占用的并发槽系数（默认 1）。
+	ConcurrencyCost float64 `json:"concurrency_cost,omitempty"`
 }
 
 // ProviderRow 是 providers 表的镜像（不含凭证密文）。

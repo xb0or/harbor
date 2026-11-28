@@ -3,7 +3,9 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"sort"
 	"strings"
@@ -22,8 +24,10 @@ type modelEntryView struct {
 	Visible      bool     `json:"visible"`
 	Context      int      `json:"context"`
 	Capabilities []string `json:"capabilities"`
-	MappedTo     []string `json:"mapped_to"`
-	State        string   `json:"state"` // visible | hidden | mapped | disabled
+	// ConcurrencyCost 是该模型每次请求占用的并发槽系数（默认 1）。
+	ConcurrencyCost float64  `json:"concurrency_cost"`
+	MappedTo        []string `json:"mapped_to"`
+	State           string   `json:"state"` // visible | hidden | mapped | disabled
 }
 
 // providerModelViews 汇总某个 Provider 的模型行（含反向映射）。
@@ -49,12 +53,16 @@ func (s *Server) providerModelViews(name string) ([]modelEntryView, bool) {
 	out := make([]modelEntryView, 0, len(specs))
 	for _, sp := range specs {
 		v := modelEntryView{
-			ID:           sp.ID,
-			Enabled:      sp.IsEnabled(),
-			Visible:      sp.IsVisible(),
-			Context:      sp.Context,
-			Capabilities: append([]string{}, sp.Capabilities...),
-			MappedTo:     append([]string{}, mappedTo[sp.ID]...),
+			ID:              sp.ID,
+			Enabled:         sp.IsEnabled(),
+			Visible:         sp.IsVisible(),
+			Context:         sp.Context,
+			Capabilities:    append([]string{}, sp.Capabilities...),
+			ConcurrencyCost: sp.ConcurrencyCost,
+			MappedTo:        append([]string{}, mappedTo[sp.ID]...),
+		}
+		if v.ConcurrencyCost <= 0 {
+			v.ConcurrencyCost = 1
 		}
 		sort.Strings(v.MappedTo)
 		switch {
@@ -135,6 +143,12 @@ func parseModelSpecPayload(raw []json.RawMessage) ([]provider.ModelSpec, error) 
 		var sp provider.ModelSpec
 		if err := json.Unmarshal(item, &sp); err != nil {
 			return nil, err
+		}
+		if math.IsNaN(sp.ConcurrencyCost) || math.IsInf(sp.ConcurrencyCost, 0) || sp.ConcurrencyCost < 0 || sp.ConcurrencyCost > 1000 {
+			return nil, fmt.Errorf("model %q concurrency_cost must be between 0 and 1000", sp.ID)
+		}
+		if sp.ConcurrencyCost == 0 {
+			sp.ConcurrencyCost = 1
 		}
 		if len(sp.Capabilities) == 0 {
 			sp.Capabilities = []string{"chat"}

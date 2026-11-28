@@ -109,6 +109,14 @@ func (m *mockUpstream) Handler() http.HandlerFunc {
 // buildTestServer 组装一个完整 Harbor 实例。
 func buildTestServer(t *testing.T, cfg *config.Config, up *httptest.Server) (http.Handler, *queue.Scheduler, *stats.Stats) {
 	t.Helper()
+	srv, sched, st := buildTestServerWithServer(t, cfg, up)
+	return srv.Handler(), sched, st
+}
+
+// buildTestServerWithServer 与 buildTestServer 相同，但返回 *Server，
+// 便于测试在启动后直接调整模型声明（例如并发系数）。
+func buildTestServerWithServer(t *testing.T, cfg *config.Config, up *httptest.Server) (*Server, *queue.Scheduler, *stats.Stats) {
+	t.Helper()
 	keyStore := key.NewStore()
 	for _, kc := range cfg.Keys {
 		keyStore.Add(kc.Secret, kc.AllowedModels)
@@ -148,7 +156,7 @@ func buildTestServer(t *testing.T, cfg *config.Config, up *httptest.Server) (htt
 	st := stats.New()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	srv := New(cfg, keyStore, mgr, exec, sched, st, nil, logger)
-	return srv.Handler(), sched, st
+	return srv, sched, st
 }
 
 func testConfig() *config.Config {

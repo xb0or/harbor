@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"sort"
 	"strconv"
@@ -86,6 +87,9 @@ type ModelSpec struct {
 	Visible      *bool    `json:"visible,omitempty"`      // false = 不单独对外暴露，但仍可被映射引用
 	Context      int      `json:"context,omitempty"`      // 上下文窗口（token），0 = 未声明
 	Capabilities []string `json:"capabilities,omitempty"` // chat / embedding / vision / reasoning / tools
+	// ConcurrencyCost 是该上游模型每次请求占用的并发槽系数，默认 1.0。
+	// 0.25 / 0.5 = 轻量模型共享并发槽；1.2–3 = 重型模型占多个槽。
+	ConcurrencyCost float64 `json:"concurrency_cost,omitempty"`
 }
 
 // IsEnabled 返回模型是否参与路由。
@@ -128,6 +132,12 @@ func NormalizeSpecs(specs []ModelSpec) []ModelSpec {
 		s.Capabilities = caps
 		if s.Context < 0 {
 			s.Context = 0
+		}
+		if s.ConcurrencyCost <= 0 || math.IsNaN(s.ConcurrencyCost) || math.IsInf(s.ConcurrencyCost, 0) {
+			s.ConcurrencyCost = 1
+		}
+		if s.ConcurrencyCost > 1000 {
+			s.ConcurrencyCost = 1000
 		}
 		out = append(out, s)
 	}
@@ -654,6 +664,49 @@ func (m *Manager) RemoveRoute(model string) bool {
 	}
 	delete(m.mappings, model)
 	return true
+}
+
+// UpstreamModelFor 返回统一模型在某 Provider 上的上游模型名。
+// 显式映射优先；没有显式映射时按自动路由处理（上游模型名 = 统一模型名）。
+func (m *Manager) UpstreamModelFor(model, providerName string) (string, bool) {
+	m.mu.RLock()
+	routes, explicit := m.mappings[model]
+	m.mu.RUnlock()
+	if explicit {
+		for _, r := range routes {
+			if r.Provider != providerName {
+				continue
+			}
+			upstream := r.UpstreamModel
+			if upstream == "" {
+				upstream = model
+			}
+			return upstream, true
+		}
+		return "", false
+	}
+	p, ok := m.Get(providerName)
+	if !ok || !p.SupportsModel(model) {
+		return "", false
+	}
+	return model, true
+}
+
+// ModelConcurrencyCost 返回统一模型在指定 Provider 上的并发占用系数。
+// 优先读 Provider 模型声明里的 concurrency_cost；未声明返回 0（由调用方兜底）。
+func (m *Manager) ModelConcurrencyCost(model, providerName string) float64 {
+	upstream, ok := m.UpstreamModelFor(model, providerName)
+	if !ok {
+		return 0
+	}
+	p, ok := m.Get(providerName)
+	if !ok {
+		return 0
+	}
+	if spec, declared := p.ModelSpec(upstream); declared && spec.ConcurrencyCost > 0 {
+		return spec.ConcurrencyCost
+	}
+	return 0
 }
 
 // ModelProviders 返回某模型按优先级排列的 Provider。

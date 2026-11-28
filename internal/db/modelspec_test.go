@@ -50,7 +50,7 @@ func TestProviderModelSpecsRoundTrip(t *testing.T) {
 		ID: "p", Name: "p", Type: "openai-compatible", BaseURL: "https://api.example.com/v1",
 		Models: []string{"a"},
 		ModelSpecs: []ModelSpec{
-			{ID: "a", Context: 128000, Capabilities: []string{"chat"}},
+			{ID: "a", Context: 128000, Capabilities: []string{"chat"}, ConcurrencyCost: 0.25},
 			{ID: "b", Enabled: &disabled, Visible: &hidden, Context: 8192},
 		},
 	}); err != nil {
@@ -72,5 +72,8 @@ func TestProviderModelSpecsRoundTrip(t *testing.T) {
 	}
 	if got.ModelSpecs[1].Context != 8192 {
 		t.Fatalf("context lost: %+v", got.ModelSpecs[1])
+	}
+	if got.ModelSpecs[0].ConcurrencyCost != 0.25 {
+		t.Fatalf("concurrency cost lost: %+v", got.ModelSpecs[0])
 	}
 }

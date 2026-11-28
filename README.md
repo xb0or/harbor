@@ -82,13 +82,31 @@ curl.exe -s http://127.0.0.1:8080/v1/models -H "Authorization: Bearer hr-live-de
 
 队头阻塞是刻意保留的：拿不到额度的请求不会被后来者越过。想更快就加额度或加上游凭证，而不是让队列插队。
 
+### 按模型加权并发
+
+Provider 的 `concurrency` 是一个共享槽位池。默认每个模型占 1 个槽；在管理台 **「模型」页** 的每一行上游模型上可以直接设置「并发系数」：
+
+```text
+上游模型                    并发系数
+deepseek-v4.1-flash:dev     2.0      # 1 个请求占 2 个槽
+glm-5.3-flash:dev           0.25     # 4 个请求共享 1 个槽
+qwen3.8-27b:dev             0.5      # 2 个请求共享 1 个槽
+```
+
+- 未设置的行按 `1.0` 处理，行为与改造前一致。
+- 系数支持小数；内部按千分位整数累计，避免 `0.25` / `1.2` 反复加减产生误差。
+- 单个请求最多占满该 Provider 的 `concurrency`：例如 `concurrency: 2` 的 Provider 上，系数 `3` 会按 `2` 计，保证重型模型仍能单独跑起来。
+- 调度仍是 FIFO：队头重型请求拿不到足够槽位时会等待，不会让后面的轻量请求越过。槽位碎片化属于预期行为，可通过调整系数或提高 Provider 并发缓解。
+- 修改后立即生效并写入 SQLite；重启保留。轻量系数会放大实际并发请求数，请确认上游账号能承受后再设小于 1 的值。
+
+
 ## 能力清单
 
 | 分组 | 能力 |
 | --- | --- |
 | 协议 | `POST /v1/chat/completions` 直通；`/v1/responses`、`/v1/messages` 桥接到 chat/completions；`/v1/embeddings`；`GET /v1/models`（带上下文与能力元数据） |
 | 鉴权 | Harbor Key（sha256）· 模型白名单 · 封禁 / 解封 |
-| 额度 | Provider 级 `concurrency` / `rpm` / `tpm` / `tph` / `tpd`，≤0 表示不限 |
+| 额度 | Provider 级 `concurrency` / `rpm` / `tpm` / `tph` / `tpd`，≤0 表示不限；模型管理页可按上游模型设置并发系数 |
 | 排队 | 内存 FIFO · 事件驱动调度 · 挂起原请求 · `X-Queue-Position` · 超时/队满 → 429 |
 | 容错 | 多凭证 / 多 Provider failover · 冷却 · `Retry-After`（整数秒 + HTTP 日期）· 重试总预算 |
 | 流式 | SSE · 空闲心跳保活 · `X-Accel-Buffering: no` · 客户端断开即释放 |

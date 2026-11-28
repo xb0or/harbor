@@ -981,6 +981,7 @@
       '<div class="cell name"><strong title="' + esc(m.id) + '">' + esc(m.id) + '</strong>' + statusBadge(m.state) + '</div>' +
       '<div class="cell col-ctx">' + ctxSelect(m) + '</div>' +
       '<div class="cell col-caps">' + caps + '</div>' +
+      '<div class="cell col-cost"><input class="ctl cost-input" type="number" min="0.05" max="10" step="0.05" data-change="model.cost" data-id="' + esc(m.id) + '" value="' + esc(String(m.concurrency_cost || 1)) + '" aria-label="并发系数" title="每次请求占用的并发槽；默认 1.0"></div>' +
       '<div class="cell">' + map + '</div>' +
       '<div class="cell">' +
       '<label class="switch" title="' + (m.enabled ? "禁用（不参与路由）" : "启用") + '"><input type="checkbox" data-change="model.enabled" data-id="' + esc(m.id) + '"' + (m.enabled ? " checked" : "") + ' aria-label="启用/禁用"><span class="track"></span></label>' +
@@ -1011,7 +1012,7 @@
         '<span class="type">' + esc(p.type) + '</span></button>';
     }).join("") || '<p class="hint">还没有上游</p>';
 
-    var head = '<div class="mtable-head"><span>上游模型</span><span class="col-ctx">上下文</span><span class="col-caps">能力</span><span>模型映射</span><span></span></div>';
+    var head = '<div class="mtable-head"><span>上游模型</span><span class="col-ctx">上下文</span><span class="col-caps">能力</span><span class="col-cost">并发</span><span>模型映射</span><span></span></div>';
     var body = shown.length ? shown.map(modelRow).join("") :
       '<div class="empty"><div class="box">' + icon("layers-3") + '</div><strong>' + (rows.length ? "当前筛选没有结果" : "还没有声明模型") + '</strong>' +
       '<p>' + (rows.length ? "换个筛选条件，或清空搜索。" : "点「获取模型」从上游拉取清单，或手动添加一个。") + '</p></div>';
@@ -1142,7 +1143,7 @@
 
   async function saveModels(rows) {
     var payload = rows.map(function (r) {
-      return { id: r.id, enabled: !!r.enabled, visible: !!r.visible, context: Number(r.context) || 0, capabilities: r.capabilities || [] };
+      return { id: r.id, enabled: !!r.enabled, visible: !!r.visible, context: Number(r.context) || 0, capabilities: r.capabilities || [], concurrency_cost: Number(r.concurrency_cost) || 1 };
     });
     var data = await api("/api/providers/" + encodeURIComponent(state.models.provider) + "/models", {
       method: "PUT", body: JSON.stringify({ models: payload })
@@ -1176,6 +1177,18 @@
 
   changes["model.enabled"] = function (input) {
     mutateModel(input.getAttribute("data-id"), function (r) { r.enabled = input.checked; })
+      .catch(function (e) { toast(e.message, true); loadModels(); });
+  };
+
+  changes["model.cost"] = function (input) {
+    var value = parseFloat(input.value);
+    if (!isFinite(value) || value <= 0 || value > 1000) {
+      toast("并发系数需大于 0 且不超过 1000", true);
+      loadModels();
+      return;
+    }
+    mutateModel(input.getAttribute("data-id"), function (r) { r.concurrency_cost = value; })
+      .then(function () { toast("并发系数已更新"); })
       .catch(function (e) { toast(e.message, true); loadModels(); });
   };
 

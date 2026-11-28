@@ -210,6 +210,7 @@ func toDBModelSpecs(specs []provider.ModelSpec) []db.ModelSpec {
 		out[i] = db.ModelSpec{
 			ID: s.ID, Enabled: s.Enabled, Visible: s.Visible,
 			Context: s.Context, Capabilities: s.Capabilities,
+			ConcurrencyCost: s.ConcurrencyCost,
 		}
 	}
 	return out
@@ -222,6 +223,7 @@ func fromDBModelSpecs(specs []db.ModelSpec) []provider.ModelSpec {
 		out[i] = provider.ModelSpec{
 			ID: s.ID, Enabled: s.Enabled, Visible: s.Visible,
 			Context: s.Context, Capabilities: s.Capabilities,
+			ConcurrencyCost: s.ConcurrencyCost,
 		}
 	}
 	return out

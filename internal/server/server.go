@@ -977,6 +977,7 @@ type providerRouteGate struct {
 	attemptSeq   uint64
 	current      *provider.Provider
 	currentID    string
+	currentCost  float64
 	currentGates []limits.Gate
 }
 
@@ -1004,14 +1005,34 @@ func (g *providerRouteGate) TryAcquireTokens(jobID string, n int) bool {
 		gates := g.server.providerGates(p)
 		attemptID := fmt.Sprintf("%s:attempt:%d", jobID, g.attemptSeq)
 		g.attemptSeq++
-		if tryAcquireProviderGates(gates, attemptID, n) {
+		cost := g.effectiveCost(p)
+		if tryAcquireProviderGates(gates, attemptID, n, cost) {
 			g.current = p
 			g.currentID = attemptID
+			g.currentCost = cost
 			g.currentGates = gates
 			return true
 		}
 	}
 	return false
+}
+
+// effectiveCost 返回该模型在指定 Provider 上实际占用的槽数。
+// 系数来自 Provider 模型声明（模型管理页）；单个请求最多占满该 Provider 的
+// 并发上限，避免系数大于上限时永远排不到。
+func (g *providerRouteGate) effectiveCost(p *provider.Provider) float64 {
+	cost := 1.0
+	if g.server != nil && g.server.mgr != nil && p != nil {
+		if declared := g.server.mgr.ModelConcurrencyCost(g.model, p.Name); declared > 0 {
+			cost = declared
+		}
+	}
+	if p != nil {
+		if limit := p.Snapshot().Concurrency; limit > 0 && cost > float64(limit) {
+			cost = float64(limit)
+		}
+	}
+	return cost
 }
 
 func (g *providerRouteGate) SettleTokens(jobID string, actual int) {
@@ -1060,9 +1081,15 @@ func (g *providerRouteGate) NextAvailable() (time.Time, bool) {
 			continue
 		}
 		for _, gate := range g.server.providerGates(p) {
-			t, ok := gate.NextAvailable()
-			if token, isToken := gate.(*limits.TokenGate); isToken {
-				t, ok = token.NextAvailableTokens(g.reserve)
+			var t time.Time
+			var ok bool
+			if concurrency, isConcurrency := gate.(*limits.ConcurrencyGate); isConcurrency {
+				t, ok = concurrency.NextAvailableCost(g.effectiveCost(p))
+			} else {
+				t, ok = gate.NextAvailable()
+				if token, isToken := gate.(*limits.TokenGate); isToken {
+					t, ok = token.NextAvailableTokens(g.reserve)
+				}
 			}
 			if ok && t.After(now) && (!found || t.Before(next)) {
 				next = t
@@ -1077,13 +1104,14 @@ func (g *providerRouteGate) NextAvailable() (time.Time, bool) {
 }
 
 func (g *providerRouteGate) releaseCurrentLocked(actual int) {
-	releaseProviderGates(g.currentGates, g.currentID, actual)
+	releaseProviderGates(g.currentGates, g.currentID, actual, g.currentCost)
 	g.current = nil
 	g.currentID = ""
+	g.currentCost = 0
 	g.currentGates = nil
 }
 
-func tryAcquireProviderGates(gates []limits.Gate, jobID string, reserve int) bool {
+func tryAcquireProviderGates(gates []limits.Gate, jobID string, reserve int, cost float64) bool {
 	type acquiredGate struct {
 		gate   limits.Gate
 		ticket *limits.RateTicket
@@ -1094,6 +1122,8 @@ func tryAcquireProviderGates(gates []limits.Gate, jobID string, reserve int) boo
 		var ticket *limits.RateTicket
 		if rate, isRate := gate.(*limits.RateGate); isRate {
 			ticket, ok = rate.TryAcquireTicket()
+		} else if concurrency, isConcurrency := gate.(*limits.ConcurrencyGate); isConcurrency {
+			ok = concurrency.TryAcquireCost(cost)
 		} else if ta, isTA := gate.(limits.TokenAcquirer); isTA {
 			ok = ta.TryAcquireTokens(jobID, reserve)
 		} else {
@@ -1103,6 +1133,8 @@ func tryAcquireProviderGates(gates []limits.Gate, jobID string, reserve int) boo
 			for i := len(acquired) - 1; i >= 0; i-- {
 				if acquired[i].ticket != nil {
 					acquired[i].ticket.Cancel()
+				} else if concurrency, isConcurrency := acquired[i].gate.(*limits.ConcurrencyGate); isConcurrency {
+					concurrency.ReleaseCost(cost)
 				} else if ta, isTA := acquired[i].gate.(limits.TokenAcquirer); isTA {
 					ta.SettleTokens(jobID, 0)
 				} else {
@@ -1116,9 +1148,11 @@ func tryAcquireProviderGates(gates []limits.Gate, jobID string, reserve int) boo
 	return true
 }
 
-func releaseProviderGates(gates []limits.Gate, jobID string, actual int) {
+func releaseProviderGates(gates []limits.Gate, jobID string, actual int, cost float64) {
 	for _, gate := range gates {
-		if ta, isTA := gate.(limits.TokenAcquirer); isTA {
+		if concurrency, isConcurrency := gate.(*limits.ConcurrencyGate); isConcurrency {
+			concurrency.ReleaseCost(cost)
+		} else if ta, isTA := gate.(limits.TokenAcquirer); isTA {
 			ta.SettleTokens(jobID, actual)
 		} else {
 			gate.Release()

@@ -370,7 +370,7 @@ textarea.ctl { height: auto; min-height: 72px; padding: 8px 10px; resize: vertic
 
 .mtable-head, .mrow {
   display: grid; gap: 12px; align-items: center; padding: 10px 16px;
-  grid-template-columns: minmax(220px, 1.6fr) 96px 214px minmax(170px, 1fr) 84px;
+  grid-template-columns: minmax(220px, 1.6fr) 96px 214px 100px minmax(170px, 1fr) 84px;
 }
 .mtable-head {
   background: var(--surface-2); border-bottom: 1px solid var(--line);
@@ -380,10 +380,11 @@ textarea.ctl { height: auto; min-height: 72px; padding: 8px 10px; resize: vertic
 .mrow:last-child { border-bottom: 0; }
 .mrow:hover { background: #fbfcfd; }
 .mrow.is-off { opacity: .58; }
-.models.hide-ctx .mtable-head, .models.hide-ctx .mrow { grid-template-columns: minmax(220px, 1.6fr) 214px minmax(170px, 1fr) 84px; }
-.models.hide-caps .mtable-head, .models.hide-caps .mrow { grid-template-columns: minmax(220px, 1.6fr) 96px minmax(170px, 1fr) 84px; }
-.models.hide-ctx.hide-caps .mtable-head, .models.hide-ctx.hide-caps .mrow { grid-template-columns: minmax(220px, 1.6fr) minmax(170px, 1fr) 84px; }
+.models.hide-ctx .mtable-head, .models.hide-ctx .mrow { grid-template-columns: minmax(220px, 1.6fr) 214px 100px minmax(170px, 1fr) 84px; }
+.models.hide-caps .mtable-head, .models.hide-caps .mrow { grid-template-columns: minmax(220px, 1.6fr) 96px 100px minmax(170px, 1fr) 84px; }
+.models.hide-ctx.hide-caps .mtable-head, .models.hide-ctx.hide-caps .mrow { grid-template-columns: minmax(220px, 1.6fr) 100px minmax(170px, 1fr) 84px; }
 .models.hide-ctx .col-ctx, .models.hide-caps .col-caps { display: none; }
+.cost-input { width: 88px; padding: 5px 7px; font: 12px/1.4 var(--mono); }
 
 .cell { min-width: 0; display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
 .cell.name { flex-wrap: nowrap; }
@@ -449,7 +450,7 @@ textarea.ctl { height: auto; min-height: 72px; padding: 8px 10px; resize: vertic
 }
 @media (max-width: 620px) {
   .mtable-head, .mrow { min-width: 0; grid-template-columns: minmax(100px, 1.4fr) minmax(84px, 1fr) 74px; gap: 8px; padding: 10px 12px; }
-  .col-ctx, .col-caps { display: none; }
+  .col-ctx, .col-caps, .col-cost { display: none; }
   .models > .card { overflow-x: visible; }
   .map-chip { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
   .model-toolbar { padding: 10px 12px; }

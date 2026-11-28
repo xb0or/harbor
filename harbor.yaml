@@ -31,6 +31,9 @@ limits:
   stream_idle_timeout: 120s
   backoff_base: 500ms
   provider_cooldown: 30s
+  # 并发槽系数在「模型管理」页按上游模型逐行设置（默认 1.0）：
+  # 0.25 / 0.5 = 轻量模型共享并发槽；1.2–3 = 重型模型占多个槽。
+  # 单个请求最多占满该 Provider 的 concurrency。
 
 # 长连接心跳保活（SSE / 流式响应）：静默过久时主动补空事件，避免被中间设备掐断。
 # 管理台「设置」页可热更新；配了 storage 时落库，重启保留。

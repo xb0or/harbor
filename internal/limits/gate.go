@@ -4,6 +4,7 @@
 package limits
 
 import (
+	"math"
 	"sync"
 	"time"
 )
@@ -21,12 +22,21 @@ type Gate interface {
 	NextAvailable() (time.Time, bool)
 }
 
-// ConcurrencyGate 是信号量式并发限制。
+// concurrencyUnit 把浮点占用系数放大成整数，避免 0.25 / 1.2 这类系数
+// 在多次加减后产生累计误差。
+const concurrencyUnit int64 = 1000
+
+// ConcurrencyGate 是加权信号量式并发限制。
+//
+// 一个请求可以占用 0.25 / 0.5 / 1 / 1.2 / 3 个槽：
+//   - 轻量模型 0.25：4 个并发请求才占满 1 个槽；
+//   - 默认 1.0：与改造前完全一致；
+//   - 重型模型 3：一个请求占 3 个槽。
 type ConcurrencyGate struct {
-	name  string
-	limit int
-	used  int
-	mu    sync.Mutex
+	name      string
+	limit     int   // 槽数；<=0 表示不限制
+	usedUnits int64 // 已占用槽数 × concurrencyUnit
+	mu        sync.Mutex
 }
 
 // NewConcurrency 构造并发 Gate。limit<=0 表示不限制。
@@ -36,15 +46,30 @@ func NewConcurrency(name string, limit int) *ConcurrencyGate {
 
 func (g *ConcurrencyGate) Name() string { return g.name }
 
-func (g *ConcurrencyGate) TryAcquire() bool {
+// costUnits 把浮点系数转成整数单位；非法/非正系数按 1 处理。
+func costUnits(cost float64) int64 {
+	if cost <= 0 || math.IsNaN(cost) || math.IsInf(cost, 0) {
+		return concurrencyUnit
+	}
+	units := int64(math.Round(cost * float64(concurrencyUnit)))
+	if units < 1 {
+		units = 1
+	}
+	return units
+}
+
+func (g *ConcurrencyGate) TryAcquire() bool { return g.TryAcquireCost(1) }
+
+// TryAcquireCost 尝试占用 cost 个并发槽；成功返回 true。
+func (g *ConcurrencyGate) TryAcquireCost(cost float64) bool {
+	need := costUnits(cost)
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.limit > 0 && g.used >= g.limit {
+	if g.limit > 0 && g.usedUnits+need > int64(g.limit)*concurrencyUnit {
 		return false
 	}
-	// Unlimited still tracks in-flight requests so enabling a limit cannot
-	// forget work already sent upstream.
-	g.used++
+	// 不限制时也累计占用，便于之后开启上限时保留已在途的请求。
+	g.usedUnits += need
 	return true
 }
 
@@ -55,29 +80,48 @@ func (g *ConcurrencyGate) UpdateLimit(limit int) {
 	g.mu.Unlock()
 }
 
-func (g *ConcurrencyGate) Release() {
+func (g *ConcurrencyGate) Release() { g.ReleaseCost(1) }
+
+// ReleaseCost 释放 cost 个并发槽；释放量超过已占用时归零。
+func (g *ConcurrencyGate) ReleaseCost(cost float64) {
+	need := costUnits(cost)
 	g.mu.Lock()
-	if g.used > 0 {
-		g.used--
+	if g.usedUnits >= need {
+		g.usedUnits -= need
+	} else {
+		g.usedUnits = 0
 	}
 	g.mu.Unlock()
 }
 
 // NextAvailable：并发满时释放时刻不可预测（依赖事件），返回 ok=false。
 func (g *ConcurrencyGate) NextAvailable() (time.Time, bool) {
+	return g.NextAvailableCost(1)
+}
+
+// NextAvailableCost 判断 cost 个槽是否有可预期的唤醒时间。
+func (g *ConcurrencyGate) NextAvailableCost(cost float64) (time.Time, bool) {
+	need := costUnits(cost)
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.limit <= 0 || g.used < g.limit {
+	if g.limit <= 0 || g.usedUnits+need <= int64(g.limit)*concurrencyUnit {
 		return time.Now(), true
 	}
 	return time.Time{}, false
 }
 
-// Used 当前占用数。
+// Used 当前占用槽数（向上取整，兼容原有整数调用方）。
 func (g *ConcurrencyGate) Used() int {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return g.used
+	return int(math.Ceil(float64(g.usedUnits) / float64(concurrencyUnit)))
+}
+
+// UsedCost 当前占用槽数（保留小数，供加权调度与诊断使用）。
+func (g *ConcurrencyGate) UsedCost() float64 {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return float64(g.usedUnits) / float64(concurrencyUnit)
 }
 
 // RateTicket 表示一次已计入 RPM 窗口的请求，可在尚未提交时撤销。

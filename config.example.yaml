@@ -21,6 +21,9 @@ limits:
   stream_idle_timeout: 120s   # 流式：两次上游数据之间的空闲上限（0=关闭）
   backoff_base: 500ms         # 重试退避基数
   provider_cooldown: 30s      # 上游失败后的冷却时间
+  # 并发槽系数在「模型管理」页按上游模型逐行设置（默认 1.0）：
+  # 0.25 / 0.5 = 轻量模型共享并发槽；1.2–3 = 重型模型占多个槽。
+  # 单个请求最多占满该 Provider 的 concurrency。
 
 # SSE 心跳保活（默认关闭；显式 enabled: true 才发送）。
 # 仅在空闲超过 interval 且当前处于完整 SSE 事件边界时插入注释帧。
