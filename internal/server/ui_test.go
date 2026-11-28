@@ -136,6 +136,12 @@ func TestUI_Pages(t *testing.T) {
 	if !strings.Contains(js, "<progress") {
 		t.Fatal("GET /admin.js queue meter must use native <progress>")
 	}
+	if !strings.Contains(js, "model.copy") || !strings.Contains(js, "copyText") {
+		t.Fatal("GET /admin.js model name must support click-to-copy")
+	}
+	if strings.Contains(js, "不展示") {
+		t.Fatal("GET /admin.js must not keep the removed hidden/not-visible model state")
+	}
 	if !strings.Contains(js, `d.getFullYear() < 1000`) {
 		t.Fatal("fmtTime must render Go zero-value times (0001-01-01) as an em dash")
 	}

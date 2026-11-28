@@ -1085,7 +1085,6 @@ func (d *DB) ListCredentials() ([]*Credential, error) {
 type ModelSpec struct {
 	ID           string   `json:"id"`
 	Enabled      *bool    `json:"enabled,omitempty"`
-	Visible      *bool    `json:"visible,omitempty"`
 	Context      int      `json:"context,omitempty"`
 	Capabilities []string `json:"capabilities,omitempty"`
 	// ConcurrencyCost 是该上游模型每次请求占用的并发槽系数（默认 1）。
@@ -1099,7 +1098,7 @@ type ProviderRow struct {
 	Type        string
 	BaseURL     string
 	Models      []string    // 已启用的模型名（由 ModelSpecs 派生）
-	ModelSpecs  []ModelSpec // 完整模型声明（含禁用/不展示）
+	ModelSpecs  []ModelSpec // 完整模型声明（含禁用项）
 	Timeout     string
 	Cooldown    string
 	Concurrency int
@@ -1176,7 +1175,7 @@ func (d *DB) ListProviders() ([]*ProviderRow, error) {
 	return out, rows.Err()
 }
 
-// parseProviderModels 解析 models 列，兼容旧格式 ["a","b"] 与新格式 [{"id":"a","visible":false}]。
+// parseProviderModels 解析 models 列，兼容旧格式 ["a","b"] 与新格式 [{"id":"a","enabled":false}]。
 func parseProviderModels(raw string) ([]ModelSpec, []string) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" || raw == "null" {

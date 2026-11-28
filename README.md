@@ -129,17 +129,17 @@ qwen3.8-27b:dev             0.5      # 2 个请求共享 1 个槽
 只读项（监听地址、请求体上限、读写/空闲超时、在途预算、SQLite 与密钥路径、日志、admin token）和白名单环境变量（`PORT`、`HARBOR_CONFIG`、`HARBOR_DB_PATH`、`HARBOR_KEY_PATH`、`HARBOR_KEY`、`HARBOR_ADMIN_TOKEN`、`OPENAI_API_KEY`、`FLY_*`）只做展示；敏感值只显示「已设置」。
 
 <details>
-<summary>模型页：两个开关与 <code>/v1/models</code> 的可见性规则</summary>
+<summary>模型页：启用开关、并发系数与 <code>/v1/models</code> 规则</summary>
 
-每条上游模型是一条声明，两个开关 + 一组元数据，互不影响：
+每条上游模型是一条声明：一个启用开关 + 并发系数 + 一组元数据，互不影响：
 
 | 字段 | 含义 |
 | --- | --- |
 | `enabled` | 关掉后真的不参与路由（自动路由与显式映射都跳过），元数据保留，可随时开回 |
-| `visible` | 关掉后只是不单独出现在 `/v1/models`，仍可按名调用、也可被映射引用 |
+| `concurrency_cost` | 每次请求占用的并发槽系数，默认 1.0；模型页「并发」列可改 |
 | `context` / `capabilities` | 展示用元数据（上下文窗口、能力标签），不参与调度 |
 
-对外规则：统一模型名（路由 key）全部可见；被任一映射当作 `upstream_model` 的上游名不再单独暴露；其余「启用且可见」的模型同名直通；最后按 Key 的 `allowed_models` 过滤。上游返回但本地没声明的模型只出现在管理台「未声明」筛选里，不会对客户端可见。
+对外规则：统一模型名（路由 key）全部可见；被任一映射当作 `upstream_model` 的上游名不再单独暴露；其余启用模型同名直通；最后按 Key 的 `allowed_models` 过滤。上游返回但本地没声明的模型只出现在管理台「未声明」筛选里，不会对客户端可见。
 
 </details>
 

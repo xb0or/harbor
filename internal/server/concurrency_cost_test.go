@@ -51,7 +51,7 @@ func TestModelCostAPIRoundTrip(t *testing.T) {
 	if got := getModels()["mock-1"]; got != 1 {
 		t.Fatalf("default cost = %v, want 1", got)
 	}
-	body := `{"models":[{"id":"mock-1","enabled":true,"visible":true,"context":0,"capabilities":["chat"],"concurrency_cost":0.25}]}`
+	body := `{"models":[{"id":"mock-1","enabled":true,"context":0,"capabilities":["chat"],"concurrency_cost":0.25}]}`
 	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/providers/mock/models", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+cfg.Admin.Token)
 	req.Header.Set("Content-Type", "application/json")

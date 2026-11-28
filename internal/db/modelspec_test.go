@@ -19,9 +19,6 @@ func TestParseProviderModelsFormats(t *testing.T) {
 	if len(enabled) != 2 || enabled[0] != "a" || enabled[1] != "c" {
 		t.Fatalf("enabled = %v, want [a c] (only b disabled)", enabled)
 	}
-	if specs[0].Visible == nil || *specs[0].Visible {
-		t.Fatalf("visible flag lost: %+v", specs[0])
-	}
 	if specs[1].Enabled == nil || *specs[1].Enabled {
 		t.Fatalf("enabled flag lost: %+v", specs[1])
 	}
@@ -45,13 +42,12 @@ func TestProviderModelSpecsRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	disabled := false
-	hidden := false
 	if err := d.UpsertProvider(&ProviderRow{
 		ID: "p", Name: "p", Type: "openai-compatible", BaseURL: "https://api.example.com/v1",
 		Models: []string{"a"},
 		ModelSpecs: []ModelSpec{
 			{ID: "a", Context: 128000, Capabilities: []string{"chat"}, ConcurrencyCost: 0.25},
-			{ID: "b", Enabled: &disabled, Visible: &hidden, Context: 8192},
+			{ID: "b", Enabled: &disabled, Context: 8192},
 		},
 	}); err != nil {
 		t.Fatal(err)

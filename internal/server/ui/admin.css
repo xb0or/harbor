@@ -388,7 +388,11 @@ textarea.ctl { height: auto; min-height: 72px; padding: 8px 10px; resize: vertic
 
 .cell { min-width: 0; display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
 .cell.name { flex-wrap: nowrap; }
-.cell.name strong { min-width: 0; overflow: hidden; font: 12px/1.5 var(--mono); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.cell.name strong, .cell.name .model-name { min-width: 0; overflow: hidden; font: 12px/1.5 var(--mono); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.cell.name .model-name { padding: 0; border: 0; background: none; color: inherit; text-align: left; cursor: pointer; }
+.cell.name .model-name:hover { color: var(--accent-ink); text-decoration: underline; }
+.cell.name .model-name:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+.copy-fallback { position: fixed; left: -9999px; top: 0; }
 .cell.name .badge { flex: 0 0 auto; }
 .ctx-input { width: 100%; height: 28px; padding: 0 8px; border: 1px solid var(--line-strong); border-radius: var(--r-sm); background: var(--surface); color: var(--ink); font: 11.5px/1.4 var(--mono); }
 .ctx-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(37, 99, 235, .12); }

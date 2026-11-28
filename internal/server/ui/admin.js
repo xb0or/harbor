@@ -242,7 +242,7 @@
       success: ["ok", "成功"], error: ["err", "失败"], timeout: ["warn", "超时"],
       cancelled: ["", "已取消"], active: ["ok", "可用"], banned: ["err", "已封禁"],
       expired: ["warn", "已过期"], cooling: ["warn", "冷却中"], unavailable: ["err", "不可用"],
-      disabled: ["", "已禁用"], hidden: ["warn", "不展示"], mapped: ["info", "有映射"], visible: ["ok", "可见"]
+      disabled: ["", "已禁用"], mapped: ["info", "有映射"], visible: ["ok", "可见"]
     };
     var item = map[status] || ["", status || "未知"];
     return '<span class="badge ' + item[0] + '">' + esc(item[1]) + '</span>';
@@ -970,15 +970,13 @@
       map = m.mapped_to.map(function (u) {
         return '<button type="button" class="map-chip" data-act="model.unmap" data-id="' + esc(m.id) + '" data-unified="' + esc(u) + '" title="点击取消映射"><span class="u">' + esc(u) + '</span><span class="x">×</span></button>';
       }).join("");
-    } else if (m.visible) {
-      map = '<span class="map-chip plain">默认</span>';
     } else {
-      map = '<span class="map-chip plain">不展示</span>';
+      map = '<span class="map-chip plain">默认</span>';
     }
     map += '<button type="button" class="map-add" data-act="model.map" data-id="' + esc(m.id) + '">+ 映射</button>';
 
     return '<div class="mrow' + (m.enabled ? "" : " is-off") + '">' +
-      '<div class="cell name"><strong title="' + esc(m.id) + '">' + esc(m.id) + '</strong>' + statusBadge(m.state) + '</div>' +
+      '<div class="cell name"><button type="button" class="model-name" data-act="model.copy" data-name="' + esc(m.id) + '" title="点击复制模型名">' + esc(m.id) + '</button>' + statusBadge(m.state) + '</div>' +
       '<div class="cell col-ctx">' + ctxSelect(m) + '</div>' +
       '<div class="cell col-caps">' + caps + '</div>' +
       '<div class="cell col-cost"><input class="ctl cost-input" type="number" min="0.05" max="10" step="0.05" data-change="model.cost" data-id="' + esc(m.id) + '" value="' + esc(String(m.concurrency_cost || 1)) + '" aria-label="并发系数" title="每次请求占用的并发槽；默认 1.0"></div>' +
@@ -996,7 +994,6 @@
       if (m.status === "on" && !r.enabled) return false;
       if (m.status === "off" && r.enabled) return false;
       if (m.view === "visible" && r.state !== "visible") return false;
-      if (m.view === "hidden" && r.state !== "hidden") return false;
       if (m.view === "mapped" && r.state !== "mapped") return false;
       if (!q) return true;
       return r.id.toLowerCase().indexOf(q) >= 0 || (r.mapped_to || []).join(" ").toLowerCase().indexOf(q) >= 0;
@@ -1004,7 +1001,6 @@
 
     var enabled = rows.filter(function (r) { return r.enabled; }).length;
     var mapped = rows.filter(function (r) { return (r.mapped_to || []).length; }).length;
-    var hidden = rows.filter(function (r) { return !r.visible; }).length;
 
     var side = state.providers.map(function (p) {
       return '<button type="button" class="provider-item" data-act="model.pick" data-name="' + esc(p.name) + '" aria-current="' + (p.name === m.provider) + '">' +
@@ -1018,7 +1014,7 @@
       '<p>' + (rows.length ? "换个筛选条件，或清空搜索。" : "点「获取模型」从上游拉取清单，或手动添加一个。") + '</p></div>';
 
     el.pages.models.innerHTML =
-      pageHead("HARBOR / MODELS", "模型管理", "以 Provider 为轴、以上游模型为行：启用、可见性与统一名映射都在这里。",
+      pageHead("HARBOR / MODELS", "模型管理", "以 Provider 为轴、以上游模型为行：启用、并发系数与统一名映射都在这里。",
         '<button type="button" class="btn ghost" data-act="model.probe"' + (m.provider ? "" : " disabled") + '>' + icon("zap") + '获取模型</button>' +
         '<button type="button" class="btn ghost" data-act="model.add"' + (m.provider ? "" : " disabled") + '>' + icon("plus") + '添加模型</button>' +
         '<button type="button" class="btn ghost" data-act="model.catalog"' + (m.provider ? "" : " disabled") + '>' + icon("database") + '模型元数据</button>' +
@@ -1027,9 +1023,9 @@
       '<aside class="provider-list">' + side + '</aside>' +
       '<section class="card"><div class="model-toolbar">' +
       seg("model.status", m.status, [["all", "全部"], ["on", "已启用"], ["off", "已禁用"]]) +
-      seg("model.view", m.view, [["all", "全部"], ["visible", "可见"], ["hidden", "不展示"], ["mapped", "有映射"]]) +
+      seg("model.view", m.view, [["all", "全部"], ["visible", "可见"], ["mapped", "有映射"]]) +
       '<div class="search">' + icon("search") + '<input class="ctl" id="model-q" placeholder="搜索模型 / 映射名" value="' + esc(m.q) + '"></div>' +
-      '<span class="hint">' + (m.provider ? "已声明 " + rows.length + " · 启用 " + enabled + " · 隐藏 " + hidden + " · 映射 " + mapped : "先选择上游") + '</span>' +
+      '<span class="hint">' + (m.provider ? "已声明 " + rows.length + " · 启用 " + enabled + " · 映射 " + mapped : "先选择上游") + '</span>' +
       '</div>' + head + body + '</section></div>';
 
     var input = $("#model-q");
@@ -1141,9 +1137,37 @@
     return state.models.rows.filter(function (r) { return r.id === id; })[0];
   }
 
+  // 复制模型名：优先 Clipboard API，失败时回退到隐藏 textarea + execCommand。
+  function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(text);
+    }
+    return new Promise(function (resolve, reject) {
+      var el = document.createElement("textarea");
+      el.className = "copy-fallback";
+      el.value = text;
+      el.setAttribute("readonly", "");
+      document.body.appendChild(el);
+      el.select();
+      var ok = false;
+      try { ok = document.execCommand("copy"); } catch (e) { /* 忽略 */ }
+      el.remove();
+      ok ? resolve() : reject(new Error("复制失败"));
+    });
+  }
+
+  actions["model.copy"] = function (btn) {
+    var name = btn.getAttribute("data-name");
+    copyText(name).then(function () {
+      toast("已复制模型名：" + name);
+    }).catch(function (e) {
+      toast(e.message, true);
+    });
+  };
+
   async function saveModels(rows) {
     var payload = rows.map(function (r) {
-      return { id: r.id, enabled: !!r.enabled, visible: !!r.visible, context: Number(r.context) || 0, capabilities: r.capabilities || [], concurrency_cost: Number(r.concurrency_cost) || 1 };
+      return { id: r.id, enabled: !!r.enabled, context: Number(r.context) || 0, capabilities: r.capabilities || [], concurrency_cost: Number(r.concurrency_cost) || 1 };
     });
     var data = await api("/api/providers/" + encodeURIComponent(state.models.provider) + "/models", {
       method: "PUT", body: JSON.stringify({ models: payload })
@@ -1312,7 +1336,7 @@
         '<label class="field"><span>上游模型 ID</span><input class="ctl mono" id="add-model-id" placeholder="例如 gpt-5.5-preview"><span class="hint">必须和上游 /models 返回的名称一致。</span></label>' +
         '<label class="field"><span>请求协议</span><select class="ctl" disabled><option>跟随提供方默认（OpenAI · Chat Completions）</option></select></label>' +
         '<label class="field"><span>上下文窗口（可选）</span><input class="ctl" id="add-model-ctx" type="number" min="0" step="1000" placeholder="例如 128000"></label>' +
-        '<div class="note">在 <b>' + esc(p.name || "") + '</b> 上登记上游模型 ID；登记后默认「不展示」，需要对外时再点「可见」或建映射。' +
+        '<div class="note">在 <b>' + esc(p.name || "") + '</b> 上登记上游模型 ID；登记后默认启用并对外可见，需要改名时再建映射。' +
         (base ? '<br>请求地址：<b class="mono">' + esc(base + "/chat/completions") + '</b>' : "") + '</div>',
       foot: '<button type="button" class="btn ghost" data-act="modal.close">取消</button><button type="button" class="btn" id="add-model-save">保存</button>',
       onMount: function () {
@@ -1323,10 +1347,10 @@
             if (!id) throw new Error("请填写上游模型 ID");
             if (findModel(id)) throw new Error("该模型已存在");
             var ctx = Math.max(0, parseInt($("#add-model-ctx").value, 10) || 0);
-            var rows = state.models.rows.concat([{ id: id, enabled: true, visible: false, context: ctx, capabilities: ["chat"], mapped_to: [] }]);
+            var rows = state.models.rows.concat([{ id: id, enabled: true, context: ctx, capabilities: ["chat"], concurrency_cost: 1, mapped_to: [] }]);
             await saveModels(rows);
             closeModal();
-            toast("已添加 " + id + "（默认不展示）");
+            toast("已添加 " + id + "（默认启用）");
           });
         };
       }
@@ -1432,11 +1456,11 @@
       var rows = state.models.rows.slice();
       ids.forEach(function (id) {
         if (rows.some(function (r) { return r.id === id; })) return;
-        rows.push({ id: id, enabled: true, visible: false, context: 0, capabilities: ["chat"], mapped_to: [] });
+        rows.push({ id: id, enabled: true, context: 0, capabilities: ["chat"], concurrency_cost: 1, mapped_to: [] });
       });
       await saveModels(rows);
       closeModal();
-      toast("已导入 " + ids.length + " 个模型（默认不展示）");
+      toast("已导入 " + ids.length + " 个模型（默认启用）");
     });
   });
 

@@ -208,7 +208,7 @@ func toDBModelSpecs(specs []provider.ModelSpec) []db.ModelSpec {
 	out := make([]db.ModelSpec, len(specs))
 	for i, s := range specs {
 		out[i] = db.ModelSpec{
-			ID: s.ID, Enabled: s.Enabled, Visible: s.Visible,
+			ID: s.ID, Enabled: s.Enabled,
 			Context: s.Context, Capabilities: s.Capabilities,
 			ConcurrencyCost: s.ConcurrencyCost,
 		}
@@ -221,7 +221,7 @@ func fromDBModelSpecs(specs []db.ModelSpec) []provider.ModelSpec {
 	out := make([]provider.ModelSpec, len(specs))
 	for i, s := range specs {
 		out[i] = provider.ModelSpec{
-			ID: s.ID, Enabled: s.Enabled, Visible: s.Visible,
+			ID: s.ID, Enabled: s.Enabled,
 			Context: s.Context, Capabilities: s.Capabilities,
 			ConcurrencyCost: s.ConcurrencyCost,
 		}

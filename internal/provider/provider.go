@@ -80,11 +80,10 @@ type Limits struct {
 }
 
 // ModelSpec 是 Provider 上一个上游模型的声明与展示元数据。
-// Enabled/Visible 用指针：nil 表示默认 true，便于 API/YAML 省略字段。
+// Enabled 用指针：nil 表示默认 true，便于 API/YAML 省略字段。
 type ModelSpec struct {
 	ID           string   `json:"id"`
 	Enabled      *bool    `json:"enabled,omitempty"`      // false = 不参与路由与列表（软删除）
-	Visible      *bool    `json:"visible,omitempty"`      // false = 不单独对外暴露，但仍可被映射引用
 	Context      int      `json:"context,omitempty"`      // 上下文窗口（token），0 = 未声明
 	Capabilities []string `json:"capabilities,omitempty"` // chat / embedding / vision / reasoning / tools
 	// ConcurrencyCost 是该上游模型每次请求占用的并发槽系数，默认 1.0。
@@ -94,9 +93,6 @@ type ModelSpec struct {
 
 // IsEnabled 返回模型是否参与路由。
 func (m ModelSpec) IsEnabled() bool { return m.Enabled == nil || *m.Enabled }
-
-// IsVisible 返回模型是否可单独出现在 /v1/models。
-func (m ModelSpec) IsVisible() bool { return m.Visible == nil || *m.Visible }
 
 // ModelCaps 是模型能力的可选取值（管理台按此渲染，写入时过滤未知值）。
 var ModelCaps = []string{"chat", "embedding", "vision", "reasoning", "tools"}
@@ -210,7 +206,7 @@ type Provider struct {
 	BaseURL string
 	// Models 是「已启用」的上游模型名（由 Specs 派生），路由只看这个列表。
 	Models []string
-	// Specs 是完整模型声明（含禁用/不展示），持久化与展示用。
+	// Specs 是完整模型声明（含禁用项），持久化与展示用。
 	Specs    []ModelSpec
 	Timeout  time.Duration
 	Cooldown time.Duration
@@ -803,7 +799,7 @@ func (m *Manager) PublicModels() []string {
 	}
 	for _, p := range providers {
 		for _, spec := range p.ModelSpecs() {
-			if !spec.IsEnabled() || !spec.IsVisible() {
+			if !spec.IsEnabled() {
 				continue
 			}
 			if unified[spec.ID] || upstreamOnly[spec.ID] {

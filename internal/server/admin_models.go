@@ -15,19 +15,18 @@ import (
 	"harbor/internal/provider"
 )
 
-// 模型管理接口：以「上游模型」为行，展示启用/可见/上下文/能力与映射关系。
+// 模型管理接口：以「上游模型」为行，展示启用、并发系数、上下文、能力与映射关系。
 
 // modelEntryView 是单行上游模型的完整视图。
 type modelEntryView struct {
 	ID           string   `json:"id"`
 	Enabled      bool     `json:"enabled"`
-	Visible      bool     `json:"visible"`
 	Context      int      `json:"context"`
 	Capabilities []string `json:"capabilities"`
 	// ConcurrencyCost 是该模型每次请求占用的并发槽系数（默认 1）。
 	ConcurrencyCost float64  `json:"concurrency_cost"`
 	MappedTo        []string `json:"mapped_to"`
-	State           string   `json:"state"` // visible | hidden | mapped | disabled
+	State           string   `json:"state"` // visible | mapped | disabled
 }
 
 // providerModelViews 汇总某个 Provider 的模型行（含反向映射）。
@@ -55,7 +54,6 @@ func (s *Server) providerModelViews(name string) ([]modelEntryView, bool) {
 		v := modelEntryView{
 			ID:              sp.ID,
 			Enabled:         sp.IsEnabled(),
-			Visible:         sp.IsVisible(),
 			Context:         sp.Context,
 			Capabilities:    append([]string{}, sp.Capabilities...),
 			ConcurrencyCost: sp.ConcurrencyCost,
@@ -70,8 +68,6 @@ func (s *Server) providerModelViews(name string) ([]modelEntryView, bool) {
 			v.State = "disabled"
 		case len(v.MappedTo) > 0:
 			v.State = "mapped"
-		case !v.Visible:
-			v.State = "hidden"
 		default:
 			v.State = "visible"
 		}
@@ -97,7 +93,7 @@ func (s *Server) handleProviderModels(w http.ResponseWriter, r *http.Request) {
 }
 
 // handlePutProviderModels PUT /api/providers/{name}/models
-// body: {"models":[{"id","enabled","visible","context","capabilities"}]} 或 {"models":["id"]}
+// body: {"models":[{"id","enabled","context","capabilities","concurrency_cost"}]} 或 {"models":["id"]}
 func (s *Server) handlePutProviderModels(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	p, ok := s.mgr.Get(name)
