@@ -155,7 +155,8 @@
     el.modalBody.innerHTML = opt.body || "";
     el.modalFoot.innerHTML = opt.foot || "";
     el.modalFoot.hidden = !opt.foot;
-    $(".modal", el.modal).classList.toggle("wide", !!opt.wide);
+    $(".modal", el.modal).classList.toggle("wide", !!opt.wide && !opt.xwide);
+    $(".modal", el.modal).classList.toggle("xwide", !!opt.xwide);
     state.modalReturn = document.activeElement;
     el.modal.hidden = false;
     if (opt.onMount) opt.onMount(el.modalBody, el.modalFoot);
@@ -593,46 +594,79 @@
     loadRequests().catch(function (e) { toast(e.message, true); });
   };
 
-  function reqKv(label, value, mono) {
-    return '<div><span>' + esc(label) + "</span><strong" + (mono ? ' class="mono"' : "") + ">" + esc(value == null || value === "" ? "—" : value) + "</strong></div>";
+  function reqLine(label, value, opt) {
+    opt = opt || {};
+    var text = value == null || value === "" ? '<span class="muted">—</span>' : (opt.html ? value : esc(value));
+    return '<div class="req-line' + (opt.wide ? " wide" : "") + '"><span>' + esc(label) + '</span><div class="req-value' + (opt.mono ? " mono" : "") + '">' + text + "</div></div>";
+  }
+
+  function reqSection(title, body) {
+    return '<section class="req-section"><h4>' + esc(title) + "</h4><div class=\"req-fields\">" + body + "</div></section>";
   }
 
   function reqDetailBody(it) {
     var ms = reqElapsed(it);
     var total = (it.tokens_in || 0) + (it.tokens_out || 0);
     var speed = ms && it.tokens_out ? (it.tokens_out / (ms / 1000)).toFixed(1) + " tok/s" : "—";
+    var hitRate = it.tokens_in && it.cached_tokens ? (it.cached_tokens / it.tokens_in * 100).toFixed(2) + "%" : "—";
     var modelLine = withThinkingLevel(it.model, it.thinking_level);
-    if (it.provider) {
-      modelLine += " → " + (it.upstream_model || it.model);
-    }
-    var kvRows = [
-      ["时间", fmtTime(reqWhen(it))],
-      ["请求 ID", it.request_id, true],
-      ["入站路径", it.inbound_path || "—", true],
-      ["上游 Request ID", it.upstream_request_id || "—", true],
-      ["状态", reqStatusText(it)],
-      ["流式", it.stream ? "是（SSE）" : "否（普通 JSON，全部生成完才返回）"],
-      ["思考等级", it.thinking_level || "—"],
-      ["用时", ms ? fmtMs(ms) : "—"],
-      ["首帧", it.first_token_ms ? fmtMs(it.first_token_ms) : "—"],
-      ["上游响应头", it.upstream_header_ms ? fmtMs(it.upstream_header_ms) : "—"],
-      ["上游 Content-Type", it.upstream_content_type || "—", true],
-      ["重试次数", it.attempts],
-      ["API Key", it.key_id, true],
-      ["来源客户端", (it.client_ua || "—") + (it.client_ip ? " · " + it.client_ip : "")],
-      ["模型", modelLine, true],
-      ["上游响应模型", it.response_model || it.upstream_model || "—", true],
-      ["提供商", it.provider || "—"],
-      ["令牌", "入 " + num(it.tokens_in) + " / 出 " + num(it.tokens_out) + " / 共 " + num(total) + (it.cached_tokens ? " · 缓存读 " + num(it.cached_tokens) : "") + (it.cache_write_tokens ? " · 缓存写 " + num(it.cache_write_tokens) : "") + (it.tokens_in && it.cached_tokens ? " · 命中率 " + (it.cached_tokens / it.tokens_in * 100).toFixed(2) + "%" : "")],
-      ["速度", speed],
-      ["排队等待", fmtMs(it.queue_wait_ms)],
-      ["错误", (it.error_code || "") + (it.error_detail ? " · " + it.error_detail : "")]
-    ];
-    var cells = kvRows.map(function (row) { return reqKv(row[0], row[1], row[2]); });
-    while (cells.length % 5 !== 0) cells.push('<div class="kv-empty"></div>');
-    var detail = '<div class="kv">' + cells.join("") + "</div>";
+    var upstreamLine = it.upstream_model || it.model;
+    var errorText = (it.error_code || "") + (it.error_detail ? " · " + it.error_detail : "");
 
-    var route = '<div class="chain"><span class="node">' + esc(it.model) + "</span><span class=\"arrow\">→</span>" +
+    var hero = '<div class="req-hero">' +
+      '<div class="req-hero-main">' +
+      '<div class="req-badges">' + reqStatusCell(it) +
+      (it.stream ? '<span class="badge info">SSE</span>' : '<span class="badge">JSON</span>') +
+(it.thinking_level ? '<span class="badge">思考 ' + esc(it.thinking_level) + "</span>" : "") +
+      "</div>" +
+      '<div class="req-model-line">' + esc(modelLine) + (it.provider && upstreamLine !== modelLine ? '<span class="req-arrow">→</span>' + esc(upstreamLine) : "") + "</div>" +
+      '<div class="req-meta-line">' + esc(fmtTime(reqWhen(it))) + " · " + esc(it.provider || "未命中上游") + " · " + esc(it.inbound_path || "—") + "</div>" +
+      "</div>" +
+      '<div class="req-hero-time"><span>总用时</span><strong>' + (ms ? fmtMs(ms) : "—") + "</strong><small>首帧 " + (it.first_token_ms ? fmtMs(it.first_token_ms) : "—") + "</small></div>" +
+      "</div>";
+
+    var metrics = '<div class="req-metrics">' +
+      [[icon("timer"), "首帧", it.first_token_ms ? fmtMs(it.first_token_ms) : "—"],
+       [icon("activity"), "上游响应头", it.upstream_header_ms ? fmtMs(it.upstream_header_ms) : "—"],
+[icon("queue"), "排队等待", fmtMs(it.queue_wait_ms)],
+       [icon("gauge"), "速度", speed]].map(function (m) {
+        return '<div class="req-metric"><span>' + m[0] + esc(m[1]) + "</span><strong>" + esc(m[2]) + "</strong></div>";
+      }).join("") + "</div>";
+
+    var requestSection = reqSection("请求",
+      reqLine("请求 ID", it.request_id, { wide: true, mono: true }) +
+      reqLine("入站路径", it.inbound_path, { mono: true }) +
+      reqLine("API Key", it.key_id, { mono: true }) +
+      reqLine("来源客户端", (it.client_ua || "—") + (it.client_ip ? " · " + it.client_ip : ""), { wide: true })
+    );
+
+    var routeSection = reqSection("模型与路由",
+      reqLine("模型", modelLine, { wide: true, mono: true }) +
+      reqLine("上游响应模型", it.response_model || it.upstream_model, { wide: true, mono: true }) +
+      reqLine("提供商", it.provider) +
+      reqLine("思考等级", it.thinking_level) +
+      reqLine("流式", it.stream ? "是（SSE）" : "否（普通 JSON）") +
+      reqLine("重试次数", it.attempts)
+    );
+
+    var usageSection = reqSection("用量",
+      reqLine("令牌", "入 " + num(it.tokens_in) + " · 出 " + num(it.tokens_out) + " · 共 " + num(total), { wide: true }) +
+      reqLine("缓存读取", it.cached_tokens ? num(it.cached_tokens) : "—") +
+      reqLine("缓存写入", it.cache_write_tokens ? num(it.cache_write_tokens) : "—") +
+      reqLine("缓存命中率", hitRate)
+    );
+
+    var upstreamSection = reqSection("上游响应",
+      reqLine("上游 Request ID", it.upstream_request_id, { wide: true, mono: true }) +
+      reqLine("Content-Type", it.upstream_content_type, { wide: true, mono: true })
+    );
+
+    var detail = '<div class="req-detail">' + hero + metrics +
+      '<div class="req-sections">' + requestSection + routeSection + usageSection + upstreamSection + "</div>" +
+      (errorText ? '<div class="req-error"><span>错误</span><div class="mono">' + esc(errorText) + "</div></div>" : "") +
+      "</div>";
+
+    var route = '<div class="chain"><span class="node">' + esc(modelLine) + "</span><span class=\"arrow\">→</span>" +
       '<span class="node">' + esc(it.provider || "未命中上游") + "</span>" +
       (it.upstream_model && it.upstream_model !== it.model ? '<span class="arrow">→</span><span class="node">' + esc(it.upstream_model) + "</span>" : "") +
       "</div>" +
@@ -641,7 +675,7 @@
       "<td>" + reqStatusCell(it) + "</td><td class=\"num\">" + esc(it.upstream_http || "—") + "</td>" +
       "<td>" + esc(it.error_detail || it.error_code || "—") + "</td></tr></tbody></table>" +
       '<p class="hint">本版本按请求汇总记录，未保留每次重试的独立明细。</p>' +
-      '<div class="preview">' + esc(JSON.stringify(it, null, 2)) + "</div>";
+      '<details class="req-raw"><summary>原始审计 JSON</summary><div class="preview">' + esc(JSON.stringify(it, null, 2)) + "</div></details>";
 
     return '<div class="tabs" role="tablist">' +
       '<button type="button" role="tab" aria-selected="true" data-tab-btn="detail">请求详情</button>' +
@@ -656,7 +690,7 @@
       var it = await api("/api/requests/" + encodeURIComponent(id));
       openModal({
         title: "请求详情",
-        wide: true,
+        xwide: true,
         body: reqDetailBody(it),
         foot: '<button type="button" class="btn ghost" data-act="modal.close">关闭</button>',
         onMount: function (body) {

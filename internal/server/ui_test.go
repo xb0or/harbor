@@ -153,7 +153,7 @@ func TestUI_Pages(t *testing.T) {
 	if !strings.Contains(js, "model.copy") || !strings.Contains(js, "copyText") {
 		t.Fatal("GET /admin.js model name must support click-to-copy")
 	}
-	for _, want := range []string{"loadProxy", "loadLogs", "/api/providers/order", "pass_headers", "/api/logs"} {
+	for _, want := range []string{"loadProxy", "loadLogs", "/api/providers/order", "pass_headers", "/api/logs", "req-detail", "req-section", "req-hero", "req-metric"} {
 		if !strings.Contains(js, want) {
 			t.Fatalf("GET /admin.js missing feature marker %q", want)
 		}

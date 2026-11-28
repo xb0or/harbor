@@ -274,6 +274,7 @@ textarea.ctl { height: auto; min-height: 72px; padding: 8px 10px; resize: vertic
   box-shadow: var(--shadow-2); animation: modal-in .2s var(--ease) both;
 }
 .modal.wide { width: min(760px, 100%); }
+.modal.xwide { width: min(980px, 100%); }
 @keyframes modal-in { from { opacity: 0; transform: translateY(8px) scale(.99); } to { opacity: 1; transform: none; } }
 .modal-head { display: flex; align-items: center; gap: 12px; padding: 16px 20px; border-bottom: 1px solid var(--line); }
 .modal-head h3 { flex: 1; font-size: 14px; font-weight: 620; letter-spacing: -.01em; }
@@ -564,6 +565,52 @@ progress.progress::-moz-progress-bar { background: var(--accent); border-radius:
 
 .kv-empty { background: var(--surface); }
 
+/* ---------- 请求详情弹窗 ---------- */
+.req-detail { display: flex; flex-direction: column; gap: 14px; }
+.req-hero {
+  display: flex; align-items: stretch; gap: 18px; padding: 16px 18px;
+  border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--surface-2);
+}
+.req-hero-main { flex: 1; min-width: 0; }
+.req-badges { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+.req-model-line { font: 13.5px/1.5 var(--mono); font-weight: 620; overflow-wrap: anywhere; }
+.req-arrow { margin: 0 6px; color: var(--faint); }
+.req-meta-line { margin-top: 5px; color: var(--dim); font-size: 11.5px; overflow-wrap: anywhere; }
+.req-hero-time {
+  flex: 0 0 auto; display: flex; flex-direction: column; justify-content: center;
+  min-width: 120px; padding-left: 18px; border-left: 1px solid var(--line); text-align: right;
+}
+.req-hero-time span { color: var(--dim); font-size: 10.5px; }
+.req-hero-time strong { margin-top: 2px; font: 24px/1.2 var(--mono); font-weight: 680; letter-spacing: -.03em; }
+.req-hero-time small { margin-top: 3px; color: var(--faint); font-size: 10.5px; }
+
+.req-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.req-metric { padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface); }
+.req-metric span { display: flex; align-items: center; gap: 5px; color: var(--dim); font-size: 10.5px; }
+.req-metric .ico { width: 12px; height: 12px; }
+.req-metric strong { display: block; margin-top: 4px; font: 13px/1.4 var(--mono); font-variant-numeric: tabular-nums; }
+
+.req-sections { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 10px; }
+.req-section { min-width: 0; padding: 13px 15px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface); }
+.req-section h4 {
+  margin-bottom: 10px; color: var(--dim); font-size: 10.5px; font-weight: 650;
+  letter-spacing: .06em; text-transform: uppercase;
+}
+.req-fields { display: flex; flex-direction: column; gap: 8px; }
+.req-line { display: grid; grid-template-columns: 86px minmax(0, 1fr); gap: 10px; align-items: start; }
+.req-line > span { color: var(--dim); font-size: 11px; line-height: 1.6; }
+.req-value { min-width: 0; color: var(--ink-2); font-size: 12.5px; line-height: 1.55; overflow-wrap: anywhere; word-break: break-word; }
+.req-value.mono { font-family: var(--mono); font-size: 11.5px; }
+.req-error {
+  display: flex; gap: 12px; padding: 12px 15px; border: 1px solid var(--err-line);
+  border-radius: var(--r-md); background: var(--err-soft); color: var(--err);
+}
+.req-error > span { flex: 0 0 86px; font-size: 11px; font-weight: 600; }
+.req-error > div { min-width: 0; font-size: 11.5px; line-height: 1.6; overflow-wrap: anywhere; }
+.req-raw { margin-top: 10px; }
+.req-raw summary { color: var(--dim); font-size: 11.5px; cursor: pointer; }
+.req-raw .preview { margin-top: 8px; }
+
 /* 用量两行（in/out/all + 缓存） */
 .tok-lines { display: flex; flex-direction: column; gap: 1px; color: var(--mut); font: 11px/1.55 var(--mono); }
 .tok-lines span { white-space: nowrap; }
@@ -572,3 +619,12 @@ progress.progress::-moz-progress-bar { background: var(--accent); border-radius:
 /* 上下文下拉（模型页） */
 select.ctx-input { appearance: auto; cursor: pointer; padding: 0 4px; }
 select.ctx-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(37, 99, 235, .12); }
+
+@media (max-width: 900px) {
+  .req-sections { grid-template-columns: minmax(0, 1fr); }
+  .req-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .req-hero { flex-direction: column; gap: 12px; }
+  .req-hero-time {
+    min-width: 0; padding: 10px 0 0; border-left: 0; border-top: 1px solid var(--line); text-align: left;
+  }
+}
